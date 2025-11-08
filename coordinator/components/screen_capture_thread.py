@@ -1,40 +1,33 @@
+#!/usr/bin/env python3
+"""
+ScreenCaptureThread for capturing and processing screen frames.
+"""
+
 import os
-import threading
 import time
 
 import cv2
 import numpy as np
 from mss import mss
+from PyQt5.QtCore import QThread, pyqtSignal, QWaitCondition, QMutex
 
 
-class VideoSource(threading.Thread):
-    """Abstract base class for video sources."""
+class ScreenCaptureThread(QThread):
+    """Thread for capturing and processing screen frames."""
 
-    def __init__(self, video_track, loop):
+    frame_ready = pyqtSignal(object)  # frame
+    error_occurred = pyqtSignal(str)  # error message
+
+    def __init__(self, fps=30):
         super().__init__()
-        self.video_track = video_track
-        self.loop = loop
-        self.running = False
-        self.daemon = True
-
-    def run(self):
-        """Main loop for the video source."""
-        raise NotImplementedError("This method should be overridden by subclasses")
-
-    def stop(self):
-        """Stops the video source loop."""
-        self.running = False
-
-
-class ScreenCaptureSource(VideoSource):
-    """Video source that captures the screen."""
-
-    def __init__(self, video_track, loop, fps=30):
-        super().__init__(video_track, loop)
         self.fps = fps
+        self.running = False
+        self.sct = None
+        self.mutex = QMutex()
+        self.condition = QWaitCondition()
 
     def run(self):
-        """Captures the screen and sends frames to the video track."""
+        """Main thread loop for screen capture."""
         self.running = True
         
         # Check display environment on Linux
@@ -50,6 +43,7 @@ class ScreenCaptureSource(VideoSource):
                 "If running on Wayland, ensure XWayland is enabled or switch to X11 session."
             )
             print(f"ERROR: {error_msg}")
+            self.error_occurred.emit(error_msg)
             return
         
         # Warn but don't fail if Wayland is detected but DISPLAY is set
@@ -62,10 +56,13 @@ class ScreenCaptureSource(VideoSource):
             # Use context manager for proper resource management on Linux
             # This ensures X11 resources are properly cleaned up
             with mss() as sct:
+                self.sct = sct  # Keep reference for external access if needed
+                
                 # Validate monitors are available
                 if not sct.monitors or len(sct.monitors) == 0:
                     error_msg = "No monitors detected for screen capture."
                     print(f"ERROR: {error_msg}")
+                    self.error_occurred.emit(error_msg)
                     return
                 
                 # Use the primary monitor (index 1)
@@ -79,14 +76,17 @@ class ScreenCaptureSource(VideoSource):
                 if 'width' not in monitor or 'height' not in monitor:
                     error_msg = "Invalid monitor configuration detected."
                     print(f"ERROR: {error_msg}")
+                    self.error_occurred.emit(error_msg)
                     return
                 
                 print(f"Screen capture initialized: {monitor['width']}x{monitor['height']} "
                       f"(DISPLAY={display})")
-                
+
+                frame_time = 1.0 / self.fps
+                sleep_ms = int(frame_time * 1000)
                 consecutive_errors = 0
                 max_consecutive_errors = 5
-                
+
                 while self.running:
                     try:
                         # Grab the data
@@ -97,6 +97,7 @@ class ScreenCaptureSource(VideoSource):
                             if consecutive_errors >= max_consecutive_errors:
                                 error_msg = "Failed to grab screen image after multiple attempts."
                                 print(f"ERROR: {error_msg}")
+                                self.error_occurred.emit(error_msg)
                                 break
                             continue
                         
@@ -112,35 +113,60 @@ class ScreenCaptureSource(VideoSource):
                         if len(frame.shape) == 3 and frame.shape[2] == 4:  # BGRA format
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                        # Ensure frame is contiguous in memory
+                        # Ensure frame is contiguous in memory for QImage
                         frame = np.ascontiguousarray(frame)
 
-                        # Add frame to the video track if the loop is running
-                        if self.video_track and self.loop and self.loop.is_running():
-                            self.loop.call_soon_threadsafe(self.video_track.add_frame, frame)
+                        # Emit the frame
+                        self.frame_ready.emit(frame)
 
-                        # Wait to maintain the desired FPS
-                        time.sleep(1 / self.fps)
+                        # Wait to maintain the desired FPS (interruptible)
+                        # Break sleep into smaller chunks to check running flag more frequently
+                        elapsed = 0
+                        chunk_ms = 10  # Check every 10ms
+                        while elapsed < sleep_ms and self.running:
+                            self.mutex.lock()
+                            remaining = min(chunk_ms, sleep_ms - elapsed)
+                            self.condition.wait(self.mutex, remaining)
+                            self.mutex.unlock()
+                            elapsed += chunk_ms
+
                     except Exception as e:
                         error_str = str(e)
                         print(f"Screen capture error: {error_str}")
                         
                         # Provide helpful error messages for common issues
                         if "XGetImage" in error_str or "X11" in error_str:
-                            print(
+                            detailed_msg = (
                                 f"X11 display error: {error_str}. "
                                 "This usually means:\n"
                                 "1. Running on Wayland instead of X11 (switch to X11 session)\n"
                                 "2. DISPLAY environment variable not set correctly\n"
                                 "3. X11 permissions issue (check xhost/xauth)"
                             )
+                            self.error_occurred.emit(detailed_msg)
+                        else:
+                            self.error_occurred.emit(f"Screen capture error: {error_str}")
                         
                         consecutive_errors += 1
                         if consecutive_errors >= max_consecutive_errors:
                             break
                         # Wait a bit before retrying
                         time.sleep(0.1)
+        
         except Exception as e:
             error_str = str(e)
             error_msg = f"Failed to initialize screen capture: {error_str}"
             print(f"ERROR: {error_msg}")
+            self.error_occurred.emit(error_msg)
+        
+        # Context manager automatically closes mss instance
+        self.sct = None
+
+    def stop(self):
+        """Stop the screen capture thread."""
+        self.running = False
+        # Wake up the thread if it's waiting
+        self.mutex.lock()
+        self.condition.wakeAll()
+        self.mutex.unlock()
+        self.wait()
