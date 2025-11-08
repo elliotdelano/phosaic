@@ -1,2 +1,5 @@
 websockets
 aiortc
+numpy
+av
+mss

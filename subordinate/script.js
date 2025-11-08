@@ -62,6 +62,23 @@ function generateQRCode(id) {
 async function handleOffer(offer) {
   peerConnection = new RTCPeerConnection(configuration);
 
+  peerConnection.ontrack = (event) => {
+    console.log("Track received:", event.track.kind);
+    const videoElement = document.getElementById("video");
+    const qrCodeElement = document.getElementById("qrcode");
+
+    if (event.track.kind === "video") {
+      if (event.streams && event.streams[0]) {
+        videoElement.srcObject = event.streams[0];
+        qrCodeElement.style.display = "none";
+        videoElement.style.display = "block";
+        videoElement.play().catch((e) => {
+          console.error("Video play failed:", e);
+        });
+      }
+    }
+  };
+
   peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
       // Send candidate to the coordinator that sent the offer
@@ -79,14 +96,10 @@ async function handleOffer(offer) {
     const receiveChannel = event.channel;
     receiveChannel.onopen = () => {
       console.log("Data channel is open!");
-      document.getElementById("qrcode").innerHTML =
-        "<p>Connection established!</p>";
+      receiveChannel.send("Hello from subordinate!");
     };
     receiveChannel.onmessage = (event) => {
       console.log("Message received:", event.data);
-      const messageElement = document.createElement("p");
-      messageElement.textContent = `Received: ${event.data}`;
-      document.getElementById("qrcode").appendChild(messageElement);
     };
   };
 

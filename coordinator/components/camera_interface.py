@@ -4,6 +4,8 @@ CameraInterface main window component for QR Code Scanner application.
 """
 
 import json
+import os
+import sys
 
 import cv2
 from PyQt5.QtCore import QTimer
@@ -20,10 +22,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .video_widget import VideoWidget
 from .video_thread import VideoThread
-import sys
-import os
+from .video_widget import VideoWidget
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from coordinator import Coordinator
 
@@ -41,6 +42,15 @@ class CameraInterface(QMainWindow):
 
         self.init_ui()
         self.enumerate_cameras()
+
+        if (
+            self.available_cameras
+            and "No cameras found" not in self.available_cameras[0]
+        ):
+            try:
+                self.current_camera = int(self.available_cameras[0].split(" ")[1])
+            except (ValueError, IndexError):
+                pass
 
         # Set up timer for UI updates (check every 100ms)
         self.timer = QTimer()
@@ -127,8 +137,6 @@ class CameraInterface(QMainWindow):
                 if ret and frame is not None:
                     self.available_cameras.append(f"Camera {i}")
                 cap.release()
-            else:
-                break
 
         if not self.available_cameras:
             self.available_cameras = ["No cameras found"]
@@ -138,10 +146,24 @@ class CameraInterface(QMainWindow):
 
     def on_camera_changed(self, index):
         """Handle camera selection change."""
+        if index < 0 or index >= len(self.available_cameras):
+            return
+
+        camera_string = self.available_cameras[index]
+        if "No cameras found" in camera_string:
+            return
+
+        try:
+            camera_id = int(camera_string.split(" ")[1])
+        except (IndexError, ValueError):
+            return
+
         if self.video_thread and self.video_thread.isRunning():
             self.stop_camera()
-            self.current_camera = index
+            self.current_camera = camera_id
             self.start_camera()
+        else:
+            self.current_camera = camera_id
 
     def toggle_camera(self):
         """Toggle camera start/stop."""
@@ -152,10 +174,10 @@ class CameraInterface(QMainWindow):
 
     def start_camera(self):
         """Start the camera and video processing."""
-        if self.current_camera >= len(self.available_cameras):
-            return
-
-        if self.available_cameras[self.current_camera] == "No cameras found":
+        if (
+            not self.available_cameras
+            or "No cameras found" in self.available_cameras[0]
+        ):
             self.status_label.setText("No cameras available")
             return
 
@@ -193,16 +215,22 @@ class CameraInterface(QMainWindow):
                 qr_json = json.loads(data)
                 subordinate_id = qr_json.get("id")
                 if not subordinate_id:
-                    self.status_text.append(f"Warning: QR code missing 'id' field: {data}")
+                    self.status_text.append(
+                        f"Warning: QR code missing 'id' field: {data}"
+                    )
                     continue
 
                 if subordinate_id not in self.connected_ids:
-                    self.status_text.append(f"QR Code detected with ID: {subordinate_id}")
+                    self.status_text.append(
+                        f"QR Code detected with ID: {subordinate_id}"
+                    )
                     self.status_text.append("Initiating peer connection...")
                     self.coordinator.connect_by_id(subordinate_id)
                     self.connected_ids.add(subordinate_id)
                 else:
-                    self.status_text.append(f"Already connected to ID: {subordinate_id}")
+                    self.status_text.append(
+                        f"Already connected to ID: {subordinate_id}"
+                    )
 
             except json.JSONDecodeError:
                 self.status_text.append(f"Warning: Invalid JSON in QR code: {data}")
@@ -214,6 +242,8 @@ class CameraInterface(QMainWindow):
     def on_frame_ready(self, frame, qr_codes):
         """Handle new frame from video thread."""
         self.video_widget.set_frame(frame, qr_codes)
+        if self.coordinator.is_connected:
+            self.coordinator.add_frame(frame)
 
     def update_ui(self):
         """Update UI elements periodically."""

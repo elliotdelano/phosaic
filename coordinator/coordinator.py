@@ -5,11 +5,41 @@ import logging
 import queue
 import threading
 
-from aiortc import RTCPeerConnection, RTCSessionDescription
+import av
+from aiortc import RTCIceCandidate, RTCPeerConnection, RTCSessionDescription
+from aiortc.mediastreams import VideoStreamTrack
+from video_source import ScreenCaptureSource
 from websockets.client import connect
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class RTCVideoStreamTrack(VideoStreamTrack):
+    """
+    A video track that receives frames from an external source like a queue.
+    """
+
+    kind = "video"
+
+    def __init__(self):
+        super().__init__()
+        self.queue = asyncio.Queue(maxsize=1)
+
+    async def recv(self):
+        """Receives the next frame from the queue and returns it as a VideoFrame."""
+        frame = await self.queue.get()
+        pts, time_base = await self.next_timestamp()
+        video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
+        video_frame.pts = pts
+        video_frame.time_base = time_base
+        return video_frame
+
+    def add_frame(self, frame):
+        """Adds a frame to the queue, discarding an old one if full."""
+        if self.queue.full():
+            self.queue.get_nowait()
+        self.queue.put_nowait(frame)
 
 
 class Coordinator:
@@ -19,6 +49,10 @@ class Coordinator:
         self.status_queue = queue.Queue()
         self.is_connected = False
         self.current_id = None
+        self.video_track = None
+        self.loop = None
+        self.webrtc_thread = None
+        self.video_source = None
 
     def connect_by_id(self, subordinate_id):
         """Connect to a subordinate using the given ID."""
@@ -27,18 +61,28 @@ class Coordinator:
             ("connecting", f"Connecting to subordinate {subordinate_id}...")
         )
 
-        # Run the connection in a separate thread to avoid blocking
-        thread = threading.Thread(target=self._run_connection, args=(subordinate_id,))
-        thread.daemon = True
-        thread.start()
+        # Run the connection in a separate thread to avoid blocking the UI
+        self.webrtc_thread = threading.Thread(
+            target=self._run_connection, args=(subordinate_id,)
+        )
+        self.webrtc_thread.daemon = True
+        self.webrtc_thread.start()
 
     def _run_connection(self, subordinate_id):
         """Run the WebRTC connection logic in a separate thread."""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         try:
-            asyncio.run(self._connect_async(subordinate_id))
+            self.loop.run_until_complete(self._connect_async(subordinate_id))
         except Exception as e:
             logger.error(f"Connection failed: {e}")
             self.status_queue.put(("error", f"Connection failed: {e}"))
+        finally:
+            if self.video_source:
+                self.video_source.stop()
+            # Gracefully shutdown the loop
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.close()
 
     async def _connect_async(self, subordinate_id):
         """Asynchronous connection logic."""
@@ -50,7 +94,6 @@ class Coordinator:
                 # 1. Register and get our own ID
                 await websocket.send(json.dumps({"type": "register-coordinator"}))
 
-                # Wait for the registration confirmation
                 message = await websocket.recv()
                 data = json.loads(message)
                 if data.get("type") == "registered":
@@ -71,9 +114,10 @@ class Coordinator:
 
                 # 2. Proceed with connection logic
                 pc = RTCPeerConnection()
-                websocket.subordinate_id = (
-                    subordinate_id  # Keep track of who we are calling
-                )
+                self.video_track = RTCVideoStreamTrack()
+                pc.addTrack(self.video_track)
+
+                websocket.subordinate_id = subordinate_id
 
                 try:
                     await self.run(pc, websocket)
@@ -94,14 +138,24 @@ class Coordinator:
             if pc.iceConnectionState == "failed":
                 await pc.close()
                 self.status_queue.put(("failed", "ICE connection failed"))
+                if self.video_source:
+                    self.video_source.stop()
+                    self.video_source = None
             elif pc.iceConnectionState == "connected":
                 self.is_connected = True
                 self.status_queue.put(
                     ("connected", f"Connected to subordinate {self.current_id}")
                 )
+                # Start streaming screen capture
+                if not self.video_source:
+                    self.video_source = ScreenCaptureSource(self.video_track, self.loop)
+                    self.video_source.start()
             elif pc.iceConnectionState == "disconnected":
                 self.is_connected = False
                 self.status_queue.put(("disconnected", "Connection lost"))
+                if self.video_source:
+                    self.video_source.stop()
+                    self.video_source = None
 
         # Create data channel
         channel = pc.createDataChannel("chat")
@@ -146,8 +200,13 @@ class Coordinator:
                 self.status_queue.put(("answer_received", "WebRTC answer received"))
             elif data.get("type") == "ice-candidate":
                 candidate_info = data.get("candidate")
-                if candidate_info:
-                    await pc.addIceCandidate(candidate_info)
+                if candidate_info and candidate_info.get("candidate"):
+                    candidate = RTCIceCandidate(
+                        sdpMid=candidate_info.get("sdpMid"),
+                        sdpMLineIndex=candidate_info.get("sdpMLineIndex"),
+                        candidate=candidate_info.get("candidate"),
+                    )
+                    await pc.addIceCandidate(candidate)
             elif data.get("type") == "registered":
                 pass  # This is our own registration, ignore
             else:

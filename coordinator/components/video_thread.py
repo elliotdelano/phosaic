@@ -4,7 +4,6 @@ VideoThread for capturing and processing video frames.
 """
 
 from PyQt5.QtCore import QThread, pyqtSignal
-
 from vision import QRCodeScanner
 
 
