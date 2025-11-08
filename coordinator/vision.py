@@ -120,7 +120,7 @@ class QRCodeScanner:
 
         # Resize window to fit screen while maintaining aspect ratio
         height, width = frame_with_overlay.shape[:2]
-        max_width, max_height = 800, 600
+        max_width, max_height = 1280, 720
 
         # Calculate scaling factor to fit within max dimensions
         scale = min(max_width / width, max_height / height, 1.0)

@@ -1,9 +1,13 @@
-# QR Code Scanner
+# Phosaic - QR Code Scanner & Camera Interface
 
-A simple Python application that uses OpenCV to scan multiple QR codes from a live camera feed and display their quadrilateral coordinates and contained information.
+A Python application suite for QR code scanning and camera management with multiple interface options.
 
-## Features
+## Components
 
+### 1. QR Code Scanner (`vision.py`)
+A command-line application for QR code detection and scanning.
+
+**Features:**
 - Real-time QR code detection from camera feed
 - Supports multiple QR codes in a single frame
 - Displays bounding boxes around detected QR codes
@@ -11,6 +15,17 @@ A simple Python application that uses OpenCV to scan multiple QR codes from a li
 - Resizable windows that don't take over the full screen
 - Console output with detailed information
 - Support for both live camera and static image processing
+
+### 2. Qt Camera Interface (`interface.py`)
+A responsive GUI application for camera selection and live feed display with QR code detection.
+
+**Features:**
+- Camera selector dropdown with automatic detection
+- Responsive video display that scales with window size
+- Start/stop camera controls
+- Real-time camera feed with smooth scaling
+- **Live QR code detection with visual annotations** (bounding boxes, corner points, decoded text)
+- Cross-platform Qt-based interface
 
 ## Installation
 
@@ -21,7 +36,9 @@ A simple Python application that uses OpenCV to scan multiple QR codes from a li
 
 ## Usage
 
-### Live Camera Mode
+### QR Code Scanner (`vision.py`)
+
+#### Live Camera Mode
 Run the QR code scanner with your camera:
 
 ```bash
@@ -34,20 +51,20 @@ Use a specific camera (if you have multiple):
 python coordinator/vision.py -c 1
 ```
 
-### Static Image Mode
+#### Static Image Mode
 Process a static image containing QR codes:
 
 ```bash
 python coordinator/vision.py path/to/your/image.jpg
 ```
 
-### Command Line Options
+#### Command Line Options
 
 - `image`: Path to image file to process (optional)
 - `-c, --camera CAMERA`: Camera index to use (default: 0)
 - `-h, --help`: Show help message
 
-### Examples
+#### Examples
 
 ```bash
 # Scan with default camera
@@ -62,6 +79,20 @@ python coordinator/vision.py my_qr_codes.jpg
 # Show help
 python coordinator/vision.py --help
 ```
+
+### Camera Interface (`interface.py`)
+
+Run the Qt-based camera interface:
+
+```bash
+python coordinator/interface.py
+```
+
+This will open a responsive window with:
+- Camera selector dropdown (auto-detects available cameras)
+- Start/Stop camera button
+- Live video feed that scales with window size
+- **Real-time QR code detection with visual overlays** (green bounding boxes, blue corner points, white text labels)
 
 ## Window Behavior
 
