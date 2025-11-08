@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import time
@@ -5,6 +6,9 @@ import time
 import cv2
 import numpy as np
 from mss import mss
+
+# Setup logger for this module
+logger = logging.getLogger(__name__)
 
 
 class VideoSource(threading.Thread):
@@ -27,7 +31,7 @@ class VideoSource(threading.Thread):
 
 
 class ScreenCaptureSource(VideoSource):
-    """Video source that captures the screen."""
+    """Video source that captures the screen using robust logic."""
 
     def __init__(self, video_track, loop, fps=30):
         super().__init__(video_track, loop)
@@ -36,111 +40,105 @@ class ScreenCaptureSource(VideoSource):
     def run(self):
         """Captures the screen and sends frames to the video track."""
         self.running = True
-        
-        # Check display environment on Linux
-        display = os.environ.get('DISPLAY')
-        xdg_session = os.environ.get('XDG_SESSION_TYPE', '').lower()
-        
-        # On Linux, require DISPLAY to be set (indicates X11/XWayland is available)
-        # Note: XWayland provides X11 compatibility even on Wayland sessions
-        if not display and os.name != 'nt':
+        logger.info("--- ScreenCaptureSource thread started ---")
+
+        # Robust environment checks for Linux
+        display = os.environ.get("DISPLAY")
+        xdg_session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+
+        if not display and os.name != "nt":
             error_msg = (
                 "DISPLAY environment variable not set. "
-                "Screen capture requires X11 display access. "
-                "If running on Wayland, ensure XWayland is enabled or switch to X11 session."
+                "Screen capture requires X11 display access."
             )
-            print(f"ERROR: {error_msg}")
+            logger.error(error_msg)
+            logger.info("--- ScreenCaptureSource thread exiting ---")
             return
-        
-        # Warn but don't fail if Wayland is detected but DISPLAY is set
-        # This allows XWayland to work
-        if xdg_session == 'wayland' and display:
-            print(f"WARNING: Wayland session detected, but DISPLAY={display} is set. "
-                  "Attempting to use X11/XWayland compatibility layer.")
-        
+
+        if xdg_session == "wayland" and display:
+            logger.warning(
+                f"Wayland session detected, but DISPLAY={display} is set. "
+                "Attempting to use X11/XWayland compatibility layer."
+            )
+
         try:
-            # Use context manager for proper resource management on Linux
-            # This ensures X11 resources are properly cleaned up
+            # Use context manager for proper resource management
             with mss() as sct:
-                # Validate monitors are available
+                # Validate monitors
                 if not sct.monitors or len(sct.monitors) == 0:
-                    error_msg = "No monitors detected for screen capture."
-                    print(f"ERROR: {error_msg}")
+                    logger.error("No monitors detected for screen capture.")
+                    logger.info("--- ScreenCaptureSource thread exiting ---")
                     return
-                
+
                 # Use the primary monitor (index 1)
-                # monitors[0] is all monitors combined, monitors[1] is the primary monitor
-                if len(sct.monitors) > 1:
-                    monitor = sct.monitors[1]
-                else:
-                    monitor = sct.monitors[0]
-                
-                # Validate monitor dimensions
-                if 'width' not in monitor or 'height' not in monitor:
-                    error_msg = "Invalid monitor configuration detected."
-                    print(f"ERROR: {error_msg}")
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+
+                if "width" not in monitor or "height" not in monitor:
+                    logger.error("Invalid monitor configuration detected.")
+                    logger.info("--- ScreenCaptureSource thread exiting ---")
                     return
-                
-                print(f"Screen capture initialized: {monitor['width']}x{monitor['height']} "
-                      f"(DISPLAY={display})")
-                
-                consecutive_errors = 0
-                max_consecutive_errors = 5
-                
+
+                logger.info(
+                    f"Screen capture initialized: {monitor['width']}x{monitor['height']} "
+                    f"(DISPLAY={display})"
+                )
+
                 while self.running:
                     try:
-                        # Grab the data
+                        # Grab screen data
                         sct_img = sct.grab(monitor)
-                        
-                        if sct_img is None:
-                            consecutive_errors += 1
-                            if consecutive_errors >= max_consecutive_errors:
-                                error_msg = "Failed to grab screen image after multiple attempts."
-                                print(f"ERROR: {error_msg}")
-                                break
-                            continue
-                        
-                        consecutive_errors = 0  # Reset error counter on success
 
-                        # Convert to a numpy array - mss returns BGRA format
+                        if sct_img is None:
+                            time.sleep(0.1)  # Wait before retrying
+                            continue
+
+                        # Convert to numpy array
                         frame = np.array(sct_img)
-                        
+
                         if frame.size == 0:
                             continue
 
-                        # Convert BGRA to BGR for OpenCV compatibility
-                        if len(frame.shape) == 3 and frame.shape[2] == 4:  # BGRA format
+                        # Convert BGRA to BGR for aiortc/OpenCV compatibility
+                        if len(frame.shape) == 3 and frame.shape[2] == 4:
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                        # Ensure frame is contiguous in memory
-                        frame = np.ascontiguousarray(frame)
+                            # Ensure frame is contiguous
+                            frame = np.ascontiguousarray(frame)
 
-                        # Add frame to the video track if the loop is running
-                        if self.video_track and self.loop and self.loop.is_running():
-                            self.loop.call_soon_threadsafe(self.video_track.add_frame, frame)
-
-                        # Wait to maintain the desired FPS
-                        time.sleep(1 / self.fps)
-                    except Exception as e:
-                        error_str = str(e)
-                        print(f"Screen capture error: {error_str}")
-                        
-                        # Provide helpful error messages for common issues
-                        if "XGetImage" in error_str or "X11" in error_str:
-                            print(
-                                f"X11 display error: {error_str}. "
-                                "This usually means:\n"
-                                "1. Running on Wayland instead of X11 (switch to X11 session)\n"
-                                "2. DISPLAY environment variable not set correctly\n"
-                                "3. X11 permissions issue (check xhost/xauth)"
+                            logger.debug(
+                                "ScreenCaptureSource: Frame captured and converted."
                             )
-                        
-                        consecutive_errors += 1
-                        if consecutive_errors >= max_consecutive_errors:
-                            break
-                        # Wait a bit before retrying
-                        time.sleep(0.1)
+
+                            if (
+                                self.video_track
+                                and self.loop
+                                and self.loop.is_running()
+                            ):
+                                logger.debug(
+                                    "ScreenCaptureSource: Pushing frame to video track."
+                                )
+
+                                if (
+                                    self.video_track
+                                    and self.loop
+                                    and self.loop.is_running()
+                                ):
+                                    logger.debug(
+                                        "ScreenCaptureSource: Pushing frame to video track."
+                                    )
+
+                                    self.loop.call_soon_threadsafe(
+                                        self.video_track.add_frame, frame
+                                    )
+
+                        # Maintain FPS
+                        time.sleep(1 / self.fps)
+
+                    except Exception as e:
+                        logger.error(f"Error in screen capture loop: {e}")
+                        time.sleep(0.5)  # Pause before retrying
+
         except Exception as e:
-            error_str = str(e)
-            error_msg = f"Failed to initialize screen capture: {error_str}"
-            print(f"ERROR: {error_msg}")
+            logger.error(f"Failed to initialize screen capture: {e}")
+
+        logger.info("--- ScreenCaptureSource thread finished ---")

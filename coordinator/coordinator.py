@@ -28,11 +28,14 @@ class RTCVideoStreamTrack(VideoStreamTrack):
 
     async def recv(self):
         """Receives the next frame from the queue and returns it as a VideoFrame."""
+        logger.debug("RTCVideoStreamTrack: Waiting for frame from queue...")
         frame = await self.queue.get()
+        logger.debug("RTCVideoStreamTrack: Frame received from queue.")
         pts, time_base = await self.next_timestamp()
         video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
         video_frame.pts = pts
         video_frame.time_base = time_base
+        logger.debug("RTCVideoStreamTrack: Returning VideoFrame with pts=%s", pts)
         return video_frame
 
     def add_frame(self, frame):
@@ -40,6 +43,9 @@ class RTCVideoStreamTrack(VideoStreamTrack):
         if self.queue.full():
             self.queue.get_nowait()
         self.queue.put_nowait(frame)
+        logger.debug(
+            f"RTCVideoStreamTrack: Frame added to queue. Queue size: {self.queue.qsize()}"
+        )
 
 
 class Coordinator:
@@ -141,15 +147,20 @@ class Coordinator:
                 if self.video_source:
                     self.video_source.stop()
                     self.video_source = None
-            elif pc.iceConnectionState == "connected":
-                self.is_connected = True
-                self.status_queue.put(
-                    ("connected", f"Connected to subordinate {self.current_id}")
-                )
-                # Start streaming screen capture
+            elif pc.iceConnectionState in ["connected", "completed"]:
+                # If we are connected or completed, and the source isn't running, start it.
                 if not self.video_source:
+                    self.is_connected = True
+                    self.status_queue.put(
+                        ("connected", f"Connected to subordinate {self.current_id}")
+                    )
+                    logger.info(
+                        "--- ICE state is connected/completed, attempting to start video source ---"
+                    )
+                    logger.info("--- Creating ScreenCaptureSource ---")
                     self.video_source = ScreenCaptureSource(self.video_track, self.loop)
                     self.video_source.start()
+                    logger.info("--- ScreenCaptureSource.start() called ---")
             elif pc.iceConnectionState == "disconnected":
                 self.is_connected = False
                 self.status_queue.put(("disconnected", "Connection lost"))
@@ -199,14 +210,22 @@ class Coordinator:
                 await pc.setRemoteDescription(answer)
                 self.status_queue.put(("answer_received", "WebRTC answer received"))
             elif data.get("type") == "ice-candidate":
+                logger.info("Received ICE candidate")
                 candidate_info = data.get("candidate")
                 if candidate_info and candidate_info.get("candidate"):
-                    candidate = RTCIceCandidate(
-                        sdpMid=candidate_info.get("sdpMid"),
-                        sdpMLineIndex=candidate_info.get("sdpMLineIndex"),
-                        candidate=candidate_info.get("candidate"),
-                    )
-                    await pc.addIceCandidate(candidate)
+                    logger.info(f"  - Candidate info: {candidate_info}")
+                    try:
+                        candidate = RTCIceCandidate(
+                            candidate_info.get("candidate"),
+                            sdpMid=candidate_info.get("sdpMid"),
+                            sdpMLineIndex=candidate_info.get("sdpMLineIndex"),
+                        )
+                        await pc.addIceCandidate(candidate)
+                        logger.info("  - Added ICE candidate")
+                    except Exception as e:
+                        logger.error(f"  - Error adding ICE candidate: {e}")
+                else:
+                    logger.warning("  - Received empty ICE candidate")
             elif data.get("type") == "registered":
                 pass  # This is our own registration, ignore
             else:

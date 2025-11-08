@@ -8,7 +8,7 @@ import os
 import sys
 
 import cv2
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QComboBox,
     QFrame,
@@ -130,7 +130,7 @@ class CameraInterface(QMainWindow):
 
     def create_display_group(self, title, widget_type):
         """Create a display group with title and control buttons."""
-        from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel
+        from PyQt5.QtWidgets import QGroupBox, QHBoxLayout, QLabel, QVBoxLayout
 
         group = QGroupBox(title)
         layout = QVBoxLayout(group)
@@ -325,7 +325,7 @@ class CameraInterface(QMainWindow):
         self.status_label.setText("Screen capture error")
         # Auto-stop on error
         self.stop_screen_capture()
-        
+
         # Scroll to bottom to show latest messages
         scrollbar = self.status_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -333,8 +333,6 @@ class CameraInterface(QMainWindow):
     def on_frame_ready(self, frame, qr_codes):
         """Handle new frame from video thread."""
         self.video_widget.set_frame(frame, qr_codes)
-        if self.coordinator.is_connected:
-            self.coordinator.add_frame(frame)
 
     def update_ui(self):
         """Update UI elements periodically."""

@@ -68,14 +68,22 @@ async function handleOffer(offer) {
     const qrCodeElement = document.getElementById("qrcode");
 
     if (event.track.kind === "video") {
-      if (event.streams && event.streams[0]) {
-        videoElement.srcObject = event.streams[0];
-        qrCodeElement.style.display = "none";
-        videoElement.style.display = "block";
-        videoElement.play().catch((e) => {
-          console.error("Video play failed:", e);
-        });
-      }
+      // Create a new MediaStream and add the received track to it.
+      const newStream = new MediaStream([event.track]);
+      videoElement.srcObject = newStream;
+
+      qrCodeElement.style.display = "none";
+      videoElement.style.display = "block";
+      console.log(
+        "Video element srcObject set with new MediaStream. Attempting to play...",
+      );
+
+      // Mute the video element to allow autoplay in most browsers
+      videoElement.muted = true;
+
+      videoElement.play().catch((e) => {
+        console.error("Video play failed:", e);
+      });
     }
   };
 
