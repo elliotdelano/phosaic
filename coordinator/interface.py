@@ -4,6 +4,7 @@ Qt-based GUI interface for QR Code Scanner
 Provides a responsive window with camera selector and live camera feed display.
 """
 
+import json
 import sys
 
 import cv2
@@ -175,7 +176,16 @@ class VideoWidget(QWidget):
                 painter.setFont(font)
                 painter.setPen(QPen(QColor(255, 255, 255)))
 
-                text = f"QR{i + 1}: {data[:15]}{'...' if len(data) > 15 else ''}"
+                # Try to parse ID from JSON for display
+                display_text = data
+                try:
+                    qr_json = json.loads(data)
+                    if "id" in qr_json:
+                        display_text = f"ID: {qr_json['id']}"
+                except (json.JSONDecodeError, TypeError):
+                    pass  # Fall back to raw data if parsing fails
+
+                text = f"QR{i + 1}: {display_text[:15]}{'...' if len(display_text) > 15 else ''}"
                 painter.drawText(center_x - 50, center_y - 10, text)
 
     def clear(self):
@@ -343,11 +353,31 @@ class CameraInterface(QMainWindow):
     def on_qr_detected(self, qr_codes):
         """Handle QR code detection."""
         for data, _ in qr_codes:
-            if data and data not in self.connected_ids:
-                self.status_text.append(f"QR Code detected: {data}")
-                self.status_text.append("Initiating peer connection...")
-                self.coordinator.connect_by_id(data)
-                self.connected_ids.add(data)
+            if not data:
+                continue
+
+            try:
+                # Parse QR code data as JSON to extract the ID
+                qr_json = json.loads(data)
+                subordinate_id = qr_json.get("id")
+                if not subordinate_id:
+                    self.status_text.append(f"Warning: QR code missing 'id' field: {data}")
+                    continue
+
+                if subordinate_id not in self.connected_ids:
+                    self.status_text.append(f"QR Code detected with ID: {subordinate_id}")
+                    self.status_text.append("Initiating peer connection...")
+                    self.coordinator.connect_by_id(subordinate_id)
+                    self.connected_ids.add(subordinate_id)
+                else:
+                    self.status_text.append(f"Already connected to ID: {subordinate_id}")
+
+            except json.JSONDecodeError:
+                self.status_text.append(f"Warning: Invalid JSON in QR code: {data}")
+                continue
+            except Exception as e:
+                self.status_text.append(f"Error processing QR code: {e}")
+                continue
 
     def on_frame_ready(self, frame, qr_codes):
         """Handle new frame from video thread."""

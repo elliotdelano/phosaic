@@ -52,12 +52,25 @@ class QRCodeScanner:
                     qr_codes.append((data, pts))
 
         # Store latest QR codes and trigger callback if set
-        if qr_codes != self.latest_qr_codes:
+        if self._qr_codes_changed(qr_codes):
             self.latest_qr_codes = qr_codes
             if self.on_qr_detected:
                 self.on_qr_detected(qr_codes)
 
         return qr_codes
+
+    def _qr_codes_changed(self, new_qr_codes):
+        """Check if the new QR codes are different from the latest ones."""
+        if len(new_qr_codes) != len(self.latest_qr_codes):
+            return True
+
+        for (new_data, new_points), (old_data, old_points) in zip(new_qr_codes, self.latest_qr_codes):
+            if new_data != old_data:
+                return True
+            if not np.array_equal(new_points, old_points):
+                return True
+
+        return False
 
     def get_latest_qr_codes(self):
         """Get the most recently detected QR codes."""

@@ -10,8 +10,6 @@ body, html {
 }
 
 #qrcode {
-    width: 90vmin;
-    height: 90vmin;
     display: flex;
     justify-content: center;
     align-items: center;

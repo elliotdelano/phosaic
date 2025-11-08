@@ -42,6 +42,13 @@ ws.onmessage = async (message) => {
   }
 };
 
+function setQRCodeSize() {
+  const qrCodeElement = document.getElementById("qrcode");
+  const size = Math.min(window.innerWidth, window.innerHeight);
+  qrCodeElement.style.width = size + "px";
+  qrCodeElement.style.height = size + "px";
+}
+
 function generateQRCode(id) {
   const qrData = JSON.stringify({ id: id });
   const qr = qrcode(0, "H");
@@ -49,6 +56,7 @@ function generateQRCode(id) {
   qr.make();
   const qrCodeElement = document.getElementById("qrcode");
   qrCodeElement.innerHTML = qr.createImgTag(10, 0);
+  setQRCodeSize();
 }
 
 async function handleOffer(offer) {
@@ -108,3 +116,7 @@ ws.onclose = () => {
 ws.onerror = (error) => {
   console.error("WebSocket error:", error);
 };
+
+// Set initial QR code size and update on resize
+window.addEventListener("load", setQRCodeSize);
+window.addEventListener("resize", setQRCodeSize);
