@@ -44,7 +44,7 @@ ws.onmessage = async (message) => {
 
 function setQRCodeSize() {
   const qrCodeElement = document.getElementById("qrcode");
-  const size = Math.min(window.innerWidth, window.innerHeight);
+  const size = Math.min(window.innerWidth, window.innerHeight) * 0.9;
   qrCodeElement.style.width = size + "px";
   qrCodeElement.style.height = size + "px";
 }
