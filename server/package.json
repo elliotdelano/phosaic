@@ -1,0 +1,17 @@
+{
+  "name": "phosaic-server",
+  "version": "1.0.0",
+  "description": "Server for Phosaic application",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.13.0"
+  }
+}
