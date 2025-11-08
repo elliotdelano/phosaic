@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "phosaic-server": "file:server"
+  }
+}

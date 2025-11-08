@@ -16,6 +16,8 @@ class QRCodeScanner:
         self.qr_detector = cv2.QRCodeDetector()
         self.cap = None
         self.camera_index = 1
+        self.latest_qr_codes = []  # Store latest detected QR codes
+        self.on_qr_detected = None  # Callback for when QR codes are detected
 
     def initialize_camera(self):
         """Initialize the camera capture."""
@@ -49,7 +51,21 @@ class QRCodeScanner:
                 if data:  # Only include QR codes with valid data
                     qr_codes.append((data, pts))
 
+        # Store latest QR codes and trigger callback if set
+        if qr_codes != self.latest_qr_codes:
+            self.latest_qr_codes = qr_codes
+            if self.on_qr_detected:
+                self.on_qr_detected(qr_codes)
+
         return qr_codes
+
+    def get_latest_qr_codes(self):
+        """Get the most recently detected QR codes."""
+        return self.latest_qr_codes
+
+    def set_qr_callback(self, callback):
+        """Set callback function to be called when QR codes are detected."""
+        self.on_qr_detected = callback
 
     def draw_qr_overlay(self, frame, qr_codes):
         """Draw bounding boxes and information overlay on the frame."""
@@ -110,6 +126,10 @@ class QRCodeScanner:
 
         # Print information to console
         self.print_qr_info(qr_codes, 1)
+
+        # Trigger callback if QR codes found
+        if qr_codes and self.on_qr_detected:
+            self.on_qr_detected(qr_codes)
 
         # Draw overlay on frame
         frame_with_overlay = self.draw_qr_overlay(frame.copy(), qr_codes)

@@ -9,9 +9,12 @@ import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QComboBox, QPushButton,
-                             QSplitter, QFrame, QSizePolicy)
+                             QSplitter, QFrame, QSizePolicy, QTextEdit)
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QRect
+
+from coordinator import Coordinator
+from vision import QRCodeScanner
 
 
 class VideoThread(QThread):
@@ -23,47 +26,29 @@ class VideoThread(QThread):
         self.camera_index = camera_index
         self.cap = None
         self.running = False
-        self.qr_detector = cv2.QRCodeDetector()
+        self.qr_scanner = QRCodeScanner()
+        self.qr_scanner.camera_index = camera_index
 
-    def detect_qr_codes(self, frame):
-        """Detect QR codes in a frame."""
-        qr_codes = []
-
-        # Detect and decode QR codes
-        retval, decoded_info, points, straight_qrcode = self.qr_detector.detectAndDecodeMulti(frame)
-
-        if retval:
-            # points is a list of 4x2 arrays, one for each detected QR code
-            for i, (data, pts) in enumerate(zip(decoded_info, points)):
-                if data:  # Only include QR codes with valid data
-                    qr_codes.append((data, pts))
-
-        return qr_codes
 
     def run(self):
         """Main thread loop for video capture."""
-        self.cap = cv2.VideoCapture(self.camera_index)
-        if not self.cap.isOpened():
+        # Initialize camera through QR scanner
+        if not self.qr_scanner.initialize_camera():
             return
-
-        # Set camera properties for better performance
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
 
         self.running = True
 
         while self.running:
-            ret, frame = self.cap.read()
+            ret, frame = self.qr_scanner.cap.read()
             if ret:
-                # Detect QR codes
-                qr_codes = self.detect_qr_codes(frame)
+                # Detect QR codes using scanner
+                qr_codes = self.qr_scanner.detect_qr_codes(frame)
                 self.frame_ready.emit(frame, qr_codes)
             else:
                 break
 
-        if self.cap:
-            self.cap.release()
+        if self.qr_scanner.cap:
+            self.qr_scanner.cap.release()
 
     def stop(self):
         """Stop the video thread."""
@@ -185,13 +170,16 @@ class CameraInterface(QMainWindow):
         self.video_thread = None
         self.current_camera = 0
         self.available_cameras = []
+        self.coordinator = Coordinator()
+        self.connected_ids = set()  # Track IDs we've already connected to
 
         self.init_ui()
         self.enumerate_cameras()
 
-        # Set up timer for UI updates
+        # Set up timer for UI updates (check every 100ms)
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_ui)
+        self.timer.start(100)
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -214,6 +202,13 @@ class CameraInterface(QMainWindow):
         # Video display area
         self.video_widget = VideoWidget()
         main_layout.addWidget(self.video_widget, 1)  # Give it stretch factor of 1
+
+        # Status display area
+        self.status_text = QTextEdit()
+        self.status_text.setMaximumHeight(150)
+        self.status_text.setReadOnly(True)
+        self.status_text.append("Ready to scan QR codes for peer connections...")
+        main_layout.addWidget(self.status_text)
 
     def create_control_panel(self):
         """Create the top control panel."""
@@ -300,6 +295,8 @@ class CameraInterface(QMainWindow):
 
         self.video_thread = VideoThread(self.current_camera)
         self.video_thread.frame_ready.connect(self.on_frame_ready)
+        # Set up QR detection callback
+        self.video_thread.qr_scanner.set_qr_callback(self.on_qr_detected)
         self.video_thread.start()
 
         self.start_stop_btn.setText("Stop Camera")
@@ -319,14 +316,30 @@ class CameraInterface(QMainWindow):
         # Clear video display
         self.video_widget.clear()
 
+    def on_qr_detected(self, qr_codes):
+        """Handle QR code detection."""
+        for data, _ in qr_codes:
+            if data and data not in self.connected_ids:
+                self.status_text.append(f"QR Code detected: {data}")
+                self.status_text.append("Initiating peer connection...")
+                self.coordinator.connect_by_id(data)
+                self.connected_ids.add(data)
+
     def on_frame_ready(self, frame, qr_codes):
         """Handle new frame from video thread."""
         self.video_widget.set_frame(frame, qr_codes)
 
     def update_ui(self):
         """Update UI elements periodically."""
-        # This could be used for additional status updates if needed
-        pass
+        # Check for coordinator status updates
+        status = self.coordinator.get_status()
+        if status:
+            status_type, message = status
+            self.status_text.append(f"[{status_type.upper()}] {message}")
+
+            # Scroll to bottom to show latest messages
+            scrollbar = self.status_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
 
     def closeEvent(self, event):
         """Handle application close event."""

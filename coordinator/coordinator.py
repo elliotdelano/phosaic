@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import json
 import logging
+import threading
+import queue
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from websockets.client import connect
@@ -10,95 +12,156 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-async def run(pc, websocket):
-    @pc.on("iceconnectionstatechange")
-    async def on_iceconnectionstatechange():
-        logger.info("ICE connection state is %s", pc.iceConnectionState)
-        if pc.iceConnectionState == "failed":
-            await pc.close()
+class Coordinator:
+    """WebRTC Coordinator for establishing peer connections via QR code IDs."""
 
-    # Create data channel
-    channel = pc.createDataChannel("chat")
-    logger.info("Data channel created: %s", channel.label)
+    def __init__(self):
+        self.status_queue = queue.Queue()
+        self.is_connected = False
+        self.current_id = None
 
-    @channel.on("open")
-    def on_open():
-        logger.info("Data channel is open")
-        channel.send("Hello from Python coordinator!")
+    def connect_by_id(self, subordinate_id):
+        """Connect to a subordinate using the given ID."""
+        self.current_id = subordinate_id
+        self.status_queue.put(("connecting", f"Connecting to subordinate {subordinate_id}..."))
 
-    @channel.on("message")
-    def on_message(message):
-        logger.info("Received message: %s", message)
+        # Run the connection in a separate thread to avoid blocking
+        thread = threading.Thread(target=self._run_connection, args=(subordinate_id,))
+        thread.daemon = True
+        thread.start()
 
-    # Create offer
-    offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
+    def _run_connection(self, subordinate_id):
+        """Run the WebRTC connection logic in a separate thread."""
+        try:
+            asyncio.run(self._connect_async(subordinate_id))
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+            self.status_queue.put(("error", f"Connection failed: {e}"))
 
-    # Send offer
-    message = {
-        "type": "offer",
-        "id": websocket.subordinate_id,
-        "offer": {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type},
-    }
-    logger.info("Sending offer...")
-    await websocket.send(json.dumps(message))
+    async def _connect_async(self, subordinate_id):
+        """Asynchronous connection logic."""
+        uri = "ws://localhost:3000"
 
-    # Listen for messages from signaling server
-    async for message in websocket:
-        data = json.loads(message)
-        logger.info("Received signaling message: %s", data.get("type"))
+        try:
+            async with connect(uri) as websocket:
+                websocket.subordinate_id = subordinate_id
 
-        if data.get("type") == "answer":
-            answer = RTCSessionDescription(
-                sdp=data["answer"]["sdp"], type=data["answer"]["type"]
-            )
-            await pc.setRemoteDescription(answer)
-        elif data.get("type") == "ice-candidate":
-            candidate_info = data.get("candidate")
-            if candidate_info:
-                # aiortc needs candidate, sdpMid, sdpMLineIndex
-                # sdpMid and sdpMLineIndex might not be present in browser candidates initially
-                # but are often needed. We assume the browser sends a complete candidate object.
-                await pc.addIceCandidate(candidate_info)
-        elif data.get("type") == "registered":
-            pass  # Ignore
-        else:
-            logger.warning("Unknown signaling message type: %s", data.get("type"))
+                await websocket.send(
+                    json.dumps({"type": "register-coordinator", "id": subordinate_id})
+                )
 
+                self.status_queue.put(("registered", f"Registered as coordinator for {subordinate_id}"))
 
-async def main():
+                pc = RTCPeerConnection()
+
+                try:
+                    await self.run(pc, websocket)
+                except KeyboardInterrupt:
+                    pass
+                finally:
+                    logger.info("Closing connection")
+                    await pc.close()
+
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+            self.status_queue.put(("error", f"WebSocket connection failed: {e}"))
+
+    async def run(self, pc, websocket):
+        @pc.on("iceconnectionstatechange")
+        async def on_iceconnectionstatechange():
+            logger.info("ICE connection state is %s", pc.iceConnectionState)
+            if pc.iceConnectionState == "failed":
+                await pc.close()
+                self.status_queue.put(("failed", "ICE connection failed"))
+            elif pc.iceConnectionState == "connected":
+                self.is_connected = True
+                self.status_queue.put(("connected", f"Connected to subordinate {self.current_id}"))
+            elif pc.iceConnectionState == "disconnected":
+                self.is_connected = False
+                self.status_queue.put(("disconnected", "Connection lost"))
+
+        # Create data channel
+        channel = pc.createDataChannel("chat")
+        logger.info("Data channel created: %s", channel.label)
+
+        @channel.on("open")
+        def on_open():
+            logger.info("Data channel is open")
+            channel.send("Hello from Python coordinator!")
+            self.status_queue.put(("channel_open", "Data channel opened"))
+
+        @channel.on("message")
+        def on_message(message):
+            logger.info("Received message: %s", message)
+            self.status_queue.put(("message", f"Received: {message}"))
+
+        # Create offer
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+
+        # Send offer
+        message = {
+            "type": "offer",
+            "id": websocket.subordinate_id,
+            "offer": {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type},
+        }
+        logger.info("Sending offer...")
+        self.status_queue.put(("offer_sent", "WebRTC offer sent"))
+        await websocket.send(json.dumps(message))
+
+        # Listen for messages from signaling server
+        async for message in websocket:
+            data = json.loads(message)
+            logger.info("Received signaling message: %s", data.get("type"))
+
+            if data.get("type") == "answer":
+                answer = RTCSessionDescription(
+                    sdp=data["answer"]["sdp"], type=data["answer"]["type"]
+                )
+                await pc.setRemoteDescription(answer)
+                self.status_queue.put(("answer_received", "WebRTC answer received"))
+            elif data.get("type") == "ice-candidate":
+                candidate_info = data.get("candidate")
+                if candidate_info:
+                    # aiortc needs candidate, sdpMid, sdpMLineIndex
+                    # sdpMid and sdpMLineIndex might not be present in browser candidates initially
+                    # but are often needed. We assume the browser sends a complete candidate object.
+                    await pc.addIceCandidate(candidate_info)
+            elif data.get("type") == "registered":
+                pass  # Ignore
+            else:
+                logger.warning("Unknown signaling message type: %s", data.get("type"))
+
+    def get_status(self):
+        """Get the latest status update if available."""
+        try:
+            return self.status_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+def main():
     parser = argparse.ArgumentParser(description="Python WebRTC coordinator")
     parser.add_argument("id", help="The ID of the subordinate to connect to")
     args = parser.parse_args()
 
-    uri = "ws://localhost:3000"
-    async with connect(uri) as websocket:
-        websocket.subordinate_id = args.id
+    # Use the Coordinator class for command line usage
+    coordinator = Coordinator()
+    coordinator.connect_by_id(args.id)
 
-        await websocket.send(
-            json.dumps({"type": "register-coordinator", "id": args.id})
-        )
-
-        pc = RTCPeerConnection()
-
-        try:
-            await run(pc, websocket)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            logger.info("Closing connection")
-            await pc.close()
-
-
-if __name__ == "__main__":
+    # Keep the program running to monitor status
     try:
-        asyncio.run(main())
+        while True:
+            status = coordinator.get_status()
+            if status:
+                print(f"Status: {status[0]} - {status[1]}")
+            import time
+            time.sleep(0.1)
     except KeyboardInterrupt:
         pass
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         pass
