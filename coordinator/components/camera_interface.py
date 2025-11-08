@@ -186,7 +186,7 @@ class CameraInterface(QMainWindow):
 
         if not self.available_cameras:
             self.available_cameras = ["No cameras found"]
-            self.start_stop_btn.setEnabled(False)
+            self.camera_start_stop_btn.setEnabled(False)
 
         self.camera_combo.addItems(self.available_cameras)
 

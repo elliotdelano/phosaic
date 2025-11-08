@@ -3,3 +3,4 @@ aiortc
 numpy
 av
 mss
+pyscreenshot  # For Wayland screen capture support (optional but recommended for Fedora/GNOME Wayland)
