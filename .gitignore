@@ -1,7 +1,8 @@
 # Dependencies
 /node_modules
 /server/node_modules
-/coodinator/__pycache__
+/coordinator/__pycache__
+/coordinator/components/__pycache__
 # Logs
 logs
 *.log
