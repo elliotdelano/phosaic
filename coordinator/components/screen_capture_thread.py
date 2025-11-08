@@ -37,7 +37,13 @@ class ScreenCaptureThread(QThread):
             def error_callback(error_msg):
                 self.error_occurred.emit(error_msg)
 
-            self.service.start(fps=self.fps, error_callback=error_callback)
+            # Set max resolution to 1920x1080 for better performance on Wayland
+            max_resolution = (1920, 1080)
+            self.service.start(
+                fps=self.fps,
+                error_callback=error_callback,
+                max_resolution=max_resolution
+            )
 
         frame_time = 1.0 / self.fps
         sleep_ms = int(frame_time * 1000)

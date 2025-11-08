@@ -30,22 +30,64 @@ class RTCVideoStreamTrack(VideoStreamTrack):
         """Receives the next frame from the queue and returns it as a VideoFrame."""
         logger.debug("RTCVideoStreamTrack: Waiting for frame from queue...")
         frame = await self.queue.get()
-        logger.debug("RTCVideoStreamTrack: Frame received from queue.")
-        pts, time_base = await self.next_timestamp()
-        video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
-        video_frame.pts = pts
-        video_frame.time_base = time_base
-        logger.debug("RTCVideoStreamTrack: Returning VideoFrame with pts=%s", pts)
-        return video_frame
+        logger.debug(
+            f"RTCVideoStreamTrack: Frame received from queue. "
+            f"Shape: {frame.shape if hasattr(frame, 'shape') else 'unknown'}, "
+            f"dtype: {frame.dtype if hasattr(frame, 'dtype') else 'unknown'}"
+        )
+        
+        try:
+            pts, time_base = await self.next_timestamp()
+            video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
+            video_frame.pts = pts
+            video_frame.time_base = time_base
+            logger.debug("RTCVideoStreamTrack: Returning VideoFrame with pts=%s", pts)
+            return video_frame
+        except Exception as e:
+            logger.error(
+                f"RTCVideoStreamTrack: Error creating VideoFrame: {e}. "
+                f"Frame shape: {frame.shape if hasattr(frame, 'shape') else 'unknown'}, "
+                f"dtype: {frame.dtype if hasattr(frame, 'dtype') else 'unknown'}"
+            )
+            # Return a black frame as fallback
+            import numpy as np
+            fallback_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            pts, time_base = await self.next_timestamp()
+            video_frame = av.VideoFrame.from_ndarray(fallback_frame, format="bgr24")
+            video_frame.pts = pts
+            video_frame.time_base = time_base
+            return video_frame
 
     def add_frame(self, frame):
         """Adds a frame to the queue, discarding an old one if full."""
-        if self.queue.full():
-            self.queue.get_nowait()
-        self.queue.put_nowait(frame)
-        logger.debug(
-            f"RTCVideoStreamTrack: Frame added to queue. Queue size: {self.queue.qsize()}"
-        )
+        try:
+            # Validate frame before adding to queue
+            if frame is None:
+                logger.warning("RTCVideoStreamTrack: Attempted to add None frame, skipping")
+                return
+                
+            if not hasattr(frame, 'shape') or not hasattr(frame, 'dtype'):
+                logger.warning(
+                    f"RTCVideoStreamTrack: Invalid frame type: {type(frame)}, skipping"
+                )
+                return
+                
+            if len(frame.shape) != 3 or frame.shape[2] != 3:
+                logger.warning(
+                    f"RTCVideoStreamTrack: Invalid frame shape: {frame.shape}, "
+                    f"expected (H, W, 3), skipping"
+                )
+                return
+                
+            if self.queue.full():
+                self.queue.get_nowait()
+            self.queue.put_nowait(frame)
+            logger.debug(
+                f"RTCVideoStreamTrack: Frame added to queue. Queue size: {self.queue.qsize()}, "
+                f"shape: {frame.shape}, dtype: {frame.dtype}"
+            )
+        except Exception as e:
+            logger.error(f"RTCVideoStreamTrack: Error adding frame to queue: {e}")
 
 
 class Coordinator:

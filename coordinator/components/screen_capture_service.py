@@ -67,16 +67,20 @@ class ScreenCaptureService:
         self._sct = None
         self._monitor = None
         self._error_callback = None
-        self._capture_method = None  # 'mss', 'pyscreenshot', 'grim', or 'gnome-screenshot'
+        self._capture_method = None  # 'mss', 'pyscreenshot', 'grim', 'gnome-screenshot', or 'ffmpeg'
         self._screen_size = None  # (width, height)
+        self._target_size = None  # Target resolution for downscaling (None = no scaling)
+        self._ffmpeg_process = None  # FFmpeg subprocess for capture
+        self._ffmpeg_pipe = None  # Pipe for reading frames from FFmpeg
 
-    def start(self, fps=30, error_callback=None):
+    def start(self, fps=30, error_callback=None, max_resolution=None):
         """
         Start the screen capture service.
 
         Args:
             fps: Frames per second for capture (default: 30)
             error_callback: Optional callback function for errors (signature: func(error_message))
+            max_resolution: Maximum resolution tuple (width, height) for downscaling (None = no scaling)
         """
         if self._running:
             logger.warning("Screen capture service is already running")
@@ -84,6 +88,7 @@ class ScreenCaptureService:
 
         self._fps = fps
         self._error_callback = error_callback
+        self._target_size = max_resolution
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
@@ -95,6 +100,20 @@ class ScreenCaptureService:
             return
 
         self._running = False
+        
+        # Stop FFmpeg process if running
+        if self._ffmpeg_process:
+            try:
+                self._ffmpeg_process.terminate()
+                self._ffmpeg_process.wait(timeout=2)
+            except:
+                try:
+                    self._ffmpeg_process.kill()
+                except:
+                    pass
+            self._ffmpeg_process = None
+            self._ffmpeg_pipe = None
+        
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
@@ -104,17 +123,107 @@ class ScreenCaptureService:
 
         logger.info("Screen capture service stopped")
 
+    def _resize_frame(self, frame):
+        """
+        Resize frame if target size is set and frame is larger.
+        
+        Args:
+            frame: numpy array frame
+            
+        Returns:
+            Resized frame or original if no resizing needed
+        """
+        if frame is None or self._target_size is None:
+            return frame
+            
+        try:
+            height, width = frame.shape[:2]
+            target_width, target_height = self._target_size
+            
+            # Only downscale, never upscale
+            if width > target_width or height > target_height:
+                # Calculate scaling factor to fit within target while maintaining aspect ratio
+                scale_w = target_width / width
+                scale_h = target_height / height
+                scale = min(scale_w, scale_h)
+                
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                
+                frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+                logger.debug(f"Resized frame from {width}x{height} to {new_width}x{new_height}")
+                
+        except Exception as e:
+            logger.debug(f"Frame resize error: {e}")
+            
+        return frame
+
+    def _normalize_frame(self, frame):
+        """
+        Normalize frame to ensure it's in the correct format for video streaming.
+        
+        Args:
+            frame: numpy array frame
+            
+        Returns:
+            Normalized frame (BGR, uint8, contiguous) or None if invalid
+        """
+        if frame is None:
+            return None
+            
+        try:
+            # Ensure it's a numpy array
+            if not isinstance(frame, np.ndarray):
+                return None
+                
+            # Check frame has valid shape
+            if len(frame.shape) != 3 or frame.shape[2] not in [3, 4]:
+                logger.debug(f"Invalid frame shape: {frame.shape}")
+                return None
+                
+            # Ensure uint8 dtype
+            if frame.dtype != np.uint8:
+                frame = frame.astype(np.uint8)
+                
+            # Convert BGRA to BGR if needed
+            if frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            elif frame.shape[2] == 3:
+                # Ensure it's BGR (pyscreenshot returns RGB, grim/gnome-screenshot return BGR)
+                # Check if it's RGB by comparing with known patterns, but for safety
+                # we'll assume it's already BGR if from cv2.imread or after conversion
+                pass
+            
+            # Resize if needed (downscale for performance)
+            frame = self._resize_frame(frame)
+                
+            # Ensure frame is contiguous in memory
+            frame = np.ascontiguousarray(frame)
+            
+            # Validate frame dimensions
+            height, width = frame.shape[:2]
+            if height == 0 or width == 0:
+                logger.debug(f"Invalid frame dimensions: {width}x{height}")
+                return None
+                
+            return frame
+        except Exception as e:
+            logger.debug(f"Frame normalization error: {e}")
+            return None
+
     def get_latest_frame(self):
         """
         Get the latest captured frame in a thread-safe manner.
+        Frames are normalized to ensure consistent format (BGR, uint8, contiguous).
 
         Returns:
-            numpy.ndarray: The latest frame (BGR format), or None if no frame is available
+            numpy.ndarray: The latest frame (BGR format, uint8, contiguous), or None if no frame is available
         """
         with self._frame_lock:
             if self._latest_frame is not None:
-                # Return a copy to ensure thread safety
-                return self._latest_frame.copy()
+                # Return a normalized copy to ensure thread safety and format consistency
+                normalized = self._normalize_frame(self._latest_frame)
+                return normalized.copy() if normalized is not None else None
             return None
 
     def is_running(self):
@@ -135,15 +244,15 @@ class ScreenCaptureService:
 
         if is_wayland:
             logger.info("Wayland session detected")
-            # Try pyscreenshot first (works on GNOME/KDE Wayland)
-            if PYSCREENSHOT_AVAILABLE:
-                available_methods.append("pyscreenshot")
-            # Try grim (works on wlroots-based compositors like Sway)
-            if self._check_command("grim"):
-                available_methods.append("grim")
-            # Try gnome-screenshot (works on GNOME Wayland)
-            if self._check_command("gnome-screenshot"):
-                available_methods.append("gnome-screenshot")
+            # Use FFmpeg only for Wayland (via PipeWire or x11grab with XWayland)
+            if self._check_command("ffmpeg"):
+                available_methods.append("ffmpeg")
+            else:
+                logger.warning(
+                    "FFmpeg not found. Screen capture on Wayland requires FFmpeg. "
+                    "Please install FFmpeg: sudo dnf install ffmpeg (Fedora) or "
+                    "sudo apt install ffmpeg (Ubuntu/Debian)"
+                )
         else:
             logger.info("X11 session detected")
             if MSS_AVAILABLE:
@@ -210,24 +319,48 @@ class ScreenCaptureService:
         try:
             # pyscreenshot automatically uses the right backend for Wayland
             img = ImageGrab.grab()
-            # Convert PIL Image to numpy array
+            # Convert PIL Image to numpy array (PIL returns RGB)
             frame = np.array(img)
-            # Convert RGB to BGR for OpenCV compatibility
+            
+            # Ensure frame is valid
+            if frame.size == 0:
+                return None
+                
+            # Convert RGB to BGR for OpenCV/video streaming compatibility
+            # pyscreenshot returns RGB, but we need BGR for video track
             if len(frame.shape) == 3 and frame.shape[2] == 3:
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            elif len(frame.shape) == 3 and frame.shape[2] == 4:
+                # RGBA to BGRA then to BGR
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGRA)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                
             return np.ascontiguousarray(frame)
         except Exception as e:
             logger.debug(f"pyscreenshot capture error: {e}")
             return None
 
     def _capture_with_grim(self):
-        """Capture screen using grim (wlroots/Wayland)."""
+        """Capture screen using grim (wlroots/Wayland) - optimized with stdout."""
         try:
-            # Create temporary file
+            # Try to use grim with stdout first (faster, no file I/O)
+            result = subprocess.run(
+                ["grim", "-"],
+                capture_output=True,
+                timeout=2
+            )
+
+            if result.returncode == 0 and result.stdout:
+                # Decode PNG from stdout directly
+                nparr = np.frombuffer(result.stdout, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    return np.ascontiguousarray(frame)
+
+            # Fallback to file-based method if stdout doesn't work
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
                 tmp_path = tmp_file.name
 
-            # Use grim to capture screen
             result = subprocess.run(
                 ["grim", tmp_path],
                 capture_output=True,
@@ -235,12 +368,14 @@ class ScreenCaptureService:
             )
 
             if result.returncode != 0:
-                os.unlink(tmp_path)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
                 return None
 
             # Read the image
             frame = cv2.imread(tmp_path)
-            os.unlink(tmp_path)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
             if frame is None:
                 return None
@@ -280,16 +415,94 @@ class ScreenCaptureService:
             logger.debug(f"gnome-screenshot capture error: {e}")
             return None
 
+    def _capture_with_ffmpeg(self):
+        """
+        Capture screen using FFmpeg directly on Wayland.
+        Uses x11grab with XWayland (most reliable) or PipeWire as fallback.
+        """
+        try:
+            width, height = self._screen_size
+            display = os.environ.get("DISPLAY")
+            
+            # Try x11grab with XWayland first (most reliable on Wayland)
+            # Most Wayland sessions have XWayland enabled for compatibility
+            if display:
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-f", "x11grab",
+                    "-s", f"{width}x{height}",
+                    "-i", display,
+                    "-vf", "format=bgr24",
+                    "-frames:v", "1",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgr24",
+                    "-loglevel", "error",  # Suppress FFmpeg output
+                    "-"
+                ]
+                
+                try:
+                    result = subprocess.run(
+                        ffmpeg_cmd,
+                        capture_output=True,
+                        timeout=2,
+                        check=False
+                    )
+                    
+                    if result.returncode == 0 and result.stdout:
+                        frame_size = width * height * 3
+                        if len(result.stdout) >= frame_size:
+                            raw_frame = result.stdout[:frame_size]
+                            frame = np.frombuffer(raw_frame, dtype=np.uint8)
+                            frame = frame.reshape((height, width, 3))
+                            return np.ascontiguousarray(frame)
+                except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                    logger.debug(f"FFmpeg x11grab failed: {e}")
+            
+            # Fallback: Try PipeWire (requires PipeWire screen sharing to be set up)
+            # This is less reliable as it requires the screen to be shared first
+            try:
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-f", "pipewire",
+                    "-i", "screen-capture-stream",  # PipeWire screen capture source
+                    "-vf", f"scale={width}:{height},format=bgr24",
+                    "-frames:v", "1",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgr24",
+                    "-loglevel", "error",
+                    "-"
+                ]
+                
+                result = subprocess.run(
+                    ffmpeg_cmd,
+                    capture_output=True,
+                    timeout=2,
+                    check=False
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    frame_size = width * height * 3
+                    if len(result.stdout) >= frame_size:
+                        raw_frame = result.stdout[:frame_size]
+                        frame = np.frombuffer(raw_frame, dtype=np.uint8)
+                        frame = frame.reshape((height, width, 3))
+                        return np.ascontiguousarray(frame)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                logger.debug(f"FFmpeg PipeWire failed: {e}")
+            
+            logger.debug("FFmpeg capture failed: x11grab and PipeWire both unavailable")
+            return None
+            
+        except Exception as e:
+            logger.debug(f"ffmpeg capture error: {e}")
+            return None
+
     def _capture_frame(self):
         """Capture a frame using the selected method."""
         if self._capture_method == "mss":
             return self._capture_with_mss(self._monitor)
-        elif self._capture_method == "pyscreenshot":
-            return self._capture_with_pyscreenshot()
-        elif self._capture_method == "grim":
-            return self._capture_with_grim()
-        elif self._capture_method == "gnome-screenshot":
-            return self._capture_with_gnome_screenshot()
+        elif self._capture_method == "ffmpeg":
+            return self._capture_with_ffmpeg()
         else:
             return None
 
@@ -302,8 +515,8 @@ class ScreenCaptureService:
             error_msg = (
                 "No screen capture method available. "
                 "For X11: install 'mss' (pip install mss). "
-                "For Wayland: install 'pyscreenshot' (pip install pyscreenshot) "
-                "or ensure 'grim' or 'gnome-screenshot' is available."
+                "For Wayland: install 'ffmpeg' (sudo dnf install ffmpeg on Fedora, "
+                "or sudo apt install ffmpeg on Ubuntu/Debian)."
             )
             logger.error(error_msg)
             if self._error_callback:
@@ -312,19 +525,15 @@ class ScreenCaptureService:
             return
 
         # Select the best available capture method
-        # Priority: mss (fastest) > pyscreenshot (universal Wayland) > grim > gnome-screenshot
+        # Priority: mss (X11) > ffmpeg (Wayland)
         if "mss" in available_methods:
             self._capture_method = "mss"
-        elif "pyscreenshot" in available_methods:
-            self._capture_method = "pyscreenshot"
-        elif "grim" in available_methods:
-            self._capture_method = "grim"
-        elif "gnome-screenshot" in available_methods:
-            self._capture_method = "gnome-screenshot"
+        elif "ffmpeg" in available_methods:
+            self._capture_method = "ffmpeg"
         else:
-            self._capture_method = available_methods[0]
+            self._capture_method = available_methods[0] if available_methods else None
 
-        logger.info(f"Using capture method: {self._capture_method}")
+        logger.info(f"Using capture method: {self._capture_method} at {self._fps} FPS")
 
         # Initialize capture method
         try:
@@ -348,13 +557,15 @@ class ScreenCaptureService:
                     f"Screen capture initialized: {monitor['width']}x{monitor['height']} "
                     f"(method: {self._capture_method})"
                 )
-            else:
-                # For Wayland methods, get screen size
+            elif self._capture_method == "ffmpeg":
+                # For FFmpeg on Wayland, get screen size
                 self._screen_size = self._get_screen_size()
                 logger.info(
                     f"Screen capture initialized: {self._screen_size[0]}x{self._screen_size[1]} "
-                    f"(method: {self._capture_method})"
+                    f"(method: {self._capture_method}, Wayland)"
                 )
+            else:
+                raise RuntimeError(f"Unknown capture method: {self._capture_method}")
 
             frame_time = 1.0 / self._fps
             consecutive_errors = 0
@@ -381,9 +592,16 @@ class ScreenCaptureService:
 
                     consecutive_errors = 0  # Reset error counter on success
 
+                    # Normalize frame before storing
+                    normalized_frame = self._normalize_frame(frame)
+                    if normalized_frame is None:
+                        logger.debug("Frame normalization failed, skipping frame")
+                        time.sleep(0.1)
+                        continue
+
                     # Update the latest frame in a thread-safe manner
                     with self._frame_lock:
-                        self._latest_frame = frame
+                        self._latest_frame = normalized_frame
 
                     # Wait to maintain the desired FPS
                     time.sleep(frame_time)
@@ -400,9 +618,9 @@ class ScreenCaptureService:
                         )
                         logger.warning(detailed_msg)
                         # Try to switch to Wayland method if available
-                        if is_wayland and "pyscreenshot" in available_methods and self._capture_method == "mss":
-                            logger.info("Switching to pyscreenshot for Wayland compatibility")
-                            self._capture_method = "pyscreenshot"
+                        if is_wayland and "ffmpeg" in available_methods and self._capture_method == "mss":
+                            logger.info("Switching to ffmpeg for Wayland compatibility")
+                            self._capture_method = "ffmpeg"
                             if self._sct:
                                 try:
                                     self._sct.close()

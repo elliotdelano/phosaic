@@ -2,6 +2,8 @@ import logging
 import threading
 import time
 
+import numpy as np
+
 # Setup logger for this module
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,14 @@ class ScreenCaptureSource(VideoSource):
             def error_callback(error_msg):
                 logger.error(f"Screen capture service error: {error_msg}")
 
-            self.service.start(fps=self.fps, error_callback=error_callback)
+            # Set max resolution to 1920x1080 for better performance on Wayland
+            # This reduces processing overhead while maintaining good quality
+            max_resolution = (1920, 1080)
+            self.service.start(
+                fps=self.fps,
+                error_callback=error_callback,
+                max_resolution=max_resolution
+            )
 
         frame_time = 1.0 / self.fps
 
@@ -67,8 +76,29 @@ class ScreenCaptureSource(VideoSource):
                 frame = self.service.get_latest_frame()
 
                 if frame is not None and frame.size > 0:
+                    # Validate frame format before sending to video track
+                    if not isinstance(frame, np.ndarray):
+                        logger.warning("Frame is not a numpy array, skipping")
+                        time.sleep(frame_time)
+                        continue
+                        
+                    if len(frame.shape) != 3 or frame.shape[2] != 3:
+                        logger.warning(
+                            f"Invalid frame shape: {frame.shape}, expected (H, W, 3), skipping"
+                        )
+                        time.sleep(frame_time)
+                        continue
+                        
+                    if frame.dtype != np.uint8:
+                        logger.warning(
+                            f"Invalid frame dtype: {frame.dtype}, expected uint8, skipping"
+                        )
+                        time.sleep(frame_time)
+                        continue
+
                     logger.debug(
-                        "ScreenCaptureSource: Frame received from service."
+                        f"ScreenCaptureSource: Frame received from service. "
+                        f"Shape: {frame.shape}, dtype: {frame.dtype}"
                     )
 
                     if (
@@ -80,8 +110,16 @@ class ScreenCaptureSource(VideoSource):
                             "ScreenCaptureSource: Pushing frame to video track."
                         )
 
+                        # Ensure frame is contiguous before sending
+                        if not frame.flags['C_CONTIGUOUS']:
+                            frame = np.ascontiguousarray(frame)
+
                         self.loop.call_soon_threadsafe(
                             self.video_track.add_frame, frame
+                        )
+                    else:
+                        logger.warning(
+                            "Video track or loop not available, skipping frame"
                         )
 
                 # Maintain FPS
