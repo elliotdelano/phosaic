@@ -3,6 +3,7 @@
 CameraInterface main window component for QR Code Scanner application.
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -41,6 +42,7 @@ class CameraInterface(QMainWindow):
         self.current_camera = 0
         self.available_cameras = []
         self.coordinator = Coordinator()
+        self.coordinator.start()
         self.connected_ids = set()  # Track IDs we've already connected to
 
         self.init_ui()
@@ -350,6 +352,20 @@ class CameraInterface(QMainWindow):
         """Handle application close event."""
         self.stop_camera()
         self.stop_screen_capture()
+
+        # Shutdown coordinator
+        if self.coordinator.loop and self.coordinator.loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self.coordinator.shutdown(), self.coordinator.loop
+            )
+            try:
+                future.result(timeout=2)  # Give it a moment to shut down
+            except Exception as e:
+                print(f"Error shutting down coordinator: {e}")
+
+        if self.coordinator.webrtc_thread:
+            self.coordinator.webrtc_thread.join(timeout=2)
+
         event.accept()
 
     def resizeEvent(self, event):

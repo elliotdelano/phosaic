@@ -4,6 +4,8 @@ import json
 import logging
 import queue
 import threading
+import time
+from concurrent.futures import TimeoutError
 
 import av
 from aiortc import RTCIceCandidate, RTCPeerConnection, RTCSessionDescription
@@ -35,7 +37,7 @@ class RTCVideoStreamTrack(VideoStreamTrack):
             f"Shape: {frame.shape if hasattr(frame, 'shape') else 'unknown'}, "
             f"dtype: {frame.dtype if hasattr(frame, 'dtype') else 'unknown'}"
         )
-        
+
         try:
             pts, time_base = await self.next_timestamp()
             video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
@@ -51,6 +53,7 @@ class RTCVideoStreamTrack(VideoStreamTrack):
             )
             # Return a black frame as fallback
             import numpy as np
+
             fallback_frame = np.zeros((480, 640, 3), dtype=np.uint8)
             pts, time_base = await self.next_timestamp()
             video_frame = av.VideoFrame.from_ndarray(fallback_frame, format="bgr24")
@@ -63,22 +66,24 @@ class RTCVideoStreamTrack(VideoStreamTrack):
         try:
             # Validate frame before adding to queue
             if frame is None:
-                logger.warning("RTCVideoStreamTrack: Attempted to add None frame, skipping")
+                logger.warning(
+                    "RTCVideoStreamTrack: Attempted to add None frame, skipping"
+                )
                 return
-                
-            if not hasattr(frame, 'shape') or not hasattr(frame, 'dtype'):
+
+            if not hasattr(frame, "shape") or not hasattr(frame, "dtype"):
                 logger.warning(
                     f"RTCVideoStreamTrack: Invalid frame type: {type(frame)}, skipping"
                 )
                 return
-                
+
             if len(frame.shape) != 3 or frame.shape[2] != 3:
                 logger.warning(
                     f"RTCVideoStreamTrack: Invalid frame shape: {frame.shape}, "
                     f"expected (H, W, 3), skipping"
                 )
                 return
-                
+
             if self.queue.full():
                 self.queue.get_nowait()
             self.queue.put_nowait(frame)
@@ -91,187 +96,256 @@ class RTCVideoStreamTrack(VideoStreamTrack):
 
 
 class Coordinator:
-    """WebRTC Coordinator for establishing peer connections via QR code IDs."""
+    """WebRTC Coordinator for establishing multiple peer connections."""
 
     def __init__(self):
         self.status_queue = queue.Queue()
-        self.is_connected = False
-        self.current_id = None
-        self.video_track = None
         self.loop = None
         self.webrtc_thread = None
         self.video_source = None
+        self.connections = {}  # subordinate_id -> { 'pc': RTCPeerConnection, 'video_track': RTCVideoStreamTrack, 'status': str }
+        self.coordinator_id = None
+        self.websocket = None
+        self._video_source_started = False
 
-    def connect_by_id(self, subordinate_id):
-        """Connect to a subordinate using the given ID."""
-        self.current_id = subordinate_id
-        self.status_queue.put(
-            ("connecting", f"Connecting to subordinate {subordinate_id}...")
-        )
+    def start(self):
+        """Start the coordinator's main event loop and websocket connection."""
+        if self.webrtc_thread is not None and self.webrtc_thread.is_alive():
+            logger.warning("Coordinator already started.")
+            return
 
-        # Run the connection in a separate thread to avoid blocking the UI
-        self.webrtc_thread = threading.Thread(
-            target=self._run_connection, args=(subordinate_id,)
-        )
+        self.webrtc_thread = threading.Thread(target=self._run_main_loop)
         self.webrtc_thread.daemon = True
         self.webrtc_thread.start()
 
-    def _run_connection(self, subordinate_id):
-        """Run the WebRTC connection logic in a separate thread."""
+    def _run_main_loop(self):
+        """Runs the asyncio event loop."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         try:
-            self.loop.run_until_complete(self._connect_async(subordinate_id))
+            self.loop.run_until_complete(self._connect_and_listen())
         except Exception as e:
-            logger.error(f"Connection failed: {e}")
-            self.status_queue.put(("error", f"Connection failed: {e}"))
+            logger.error(f"Main loop encountered an error: {e}")
+            self.status_queue.put(("error", f"Main loop failed: {e}"))
         finally:
-            if self.video_source:
-                self.video_source.stop()
-            # Gracefully shutdown the loop
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.run_until_complete(self.shutdown())
             self.loop.close()
 
-    async def _connect_async(self, subordinate_id):
-        """Asynchronous connection logic."""
+    async def _connect_and_listen(self):
+        """Connects to the signaling server and listens for messages."""
         uri = "ws://localhost:3000"
-        self.coordinator_id = None
-
         try:
             async with connect(uri) as websocket:
-                # 1. Register and get our own ID
-                await websocket.send(json.dumps({"type": "register-coordinator"}))
-
-                message = await websocket.recv()
-                data = json.loads(message)
-                if data.get("type") == "registered":
-                    self.coordinator_id = data["id"]
-                    self.status_queue.put(
-                        (
-                            "registered",
-                            f"Registered with server. Coordinator ID: {self.coordinator_id}",
-                        )
-                    )
-                    logger.info(
-                        f"Registered with server. Coordinator ID: {self.coordinator_id}"
-                    )
-                else:
-                    logger.error(f"Failed to register with server. Response: {data}")
-                    self.status_queue.put(("error", "Failed to register with server"))
-                    return
-
-                # 2. Proceed with connection logic
-                pc = RTCPeerConnection()
-                self.video_track = RTCVideoStreamTrack()
-                pc.addTrack(self.video_track)
-
-                websocket.subordinate_id = subordinate_id
-
-                try:
-                    await self.run(pc, websocket)
-                except KeyboardInterrupt:
-                    pass
-                finally:
-                    logger.info("Closing connection")
-                    await pc.close()
-
+                self.websocket = websocket
+                await self._register_with_server()
+                async for message in websocket:
+                    await self._handle_signaling_message(message)
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
             self.status_queue.put(("error", f"WebSocket connection failed: {e}"))
 
-    async def run(self, pc, websocket):
+    async def _register_with_server(self):
+        """Registers as a coordinator with the signaling server."""
+        await self.websocket.send(json.dumps({"type": "register-coordinator"}))
+        message = await self.websocket.recv()
+        data = json.loads(message)
+        if data.get("type") == "registered":
+            self.coordinator_id = data["id"]
+            self.status_queue.put(
+                ("registered", f"Registered with ID: {self.coordinator_id}")
+            )
+            logger.info(
+                f"Registered with server. Coordinator ID: {self.coordinator_id}"
+            )
+        else:
+            raise Exception(f"Failed to register with server. Response: {data}")
+
+    def connect_by_id(self, subordinate_id):
+        """Connect to a subordinate using the given ID."""
+        if not self.loop or not self.loop.is_running():
+            self.status_queue.put(
+                ("error", "Coordinator not started. Call start() first.")
+            )
+            logger.error("Cannot connect, event loop is not running.")
+            return
+
+        if subordinate_id in self.connections:
+            self.status_queue.put(
+                ("warning", f"Already connected or connecting to {subordinate_id}")
+            )
+            return
+
+        self.status_queue.put(
+            ("connecting", f"Connecting to subordinate {subordinate_id}...")
+        )
+        asyncio.run_coroutine_threadsafe(
+            self._create_peer_connection(subordinate_id), self.loop
+        )
+
+    async def _create_peer_connection(self, subordinate_id):
+        """Creates and sets up a new RTCPeerConnection."""
+        if subordinate_id in self.connections:
+            logger.warning(
+                f"Connection attempt for existing subordinate {subordinate_id}"
+            )
+            return
+
+        pc = RTCPeerConnection()
+        video_track = RTCVideoStreamTrack()
+        pc.addTrack(video_track)
+
+        self.connections[subordinate_id] = {
+            "pc": pc,
+            "video_track": video_track,
+            "status": "connecting",
+        }
+
+        await self._setup_pc_handlers_and_offer(pc, subordinate_id)
+
+    async def _setup_pc_handlers_and_offer(self, pc, subordinate_id):
+        """Sets up event handlers for a peer connection and creates an offer."""
+
         @pc.on("iceconnectionstatechange")
         async def on_iceconnectionstatechange():
-            logger.info("ICE connection state is %s", pc.iceConnectionState)
+            logger.info(
+                f"ICE connection state for {subordinate_id} is {pc.iceConnectionState}"
+            )
             if pc.iceConnectionState == "failed":
-                await pc.close()
-                self.status_queue.put(("failed", "ICE connection failed"))
-                if self.video_source:
-                    self.video_source.stop()
-                    self.video_source = None
+                self.status_queue.put(
+                    ("failed", f"ICE connection failed for {subordinate_id}")
+                )
+                await self.cleanup_connection(subordinate_id)
             elif pc.iceConnectionState in ["connected", "completed"]:
-                # If we are connected or completed, and the source isn't running, start it.
-                if not self.video_source:
-                    self.is_connected = True
-                    self.status_queue.put(
-                        ("connected", f"Connected to subordinate {self.current_id}")
-                    )
-                    logger.info(
-                        "--- ICE state is connected/completed, attempting to start video source ---"
-                    )
-                    logger.info("--- Creating ScreenCaptureSource ---")
-                    self.video_source = ScreenCaptureSource(self.video_track, self.loop)
-                    self.video_source.start()
-                    logger.info("--- ScreenCaptureSource.start() called ---")
-            elif pc.iceConnectionState == "disconnected":
-                self.is_connected = False
-                self.status_queue.put(("disconnected", "Connection lost"))
+                self.connections[subordinate_id]["status"] = "connected"
+                self.status_queue.put(
+                    ("connected", f"Connected to subordinate {subordinate_id}")
+                )
+                self._start_video_source_if_needed()
                 if self.video_source:
-                    self.video_source.stop()
-                    self.video_source = None
+                    self.video_source.add_track(
+                        self.connections[subordinate_id]["video_track"]
+                    )
+            elif pc.iceConnectionState == "disconnected":
+                self.status_queue.put(
+                    ("disconnected", f"Connection lost with {subordinate_id}")
+                )
+                await self.cleanup_connection(subordinate_id)
 
-        # Create data channel
+        # Data channel setup
         channel = pc.createDataChannel("chat")
-        logger.info("Data channel created: %s", channel.label)
 
         @channel.on("open")
         def on_open():
-            logger.info("Data channel is open")
-            channel.send("Hello from Python coordinator!")
-            self.status_queue.put(("channel_open", "Data channel opened"))
+            logger.info(f"Data channel for {subordinate_id} is open")
+            channel.send(f"Hello from Python coordinator to {subordinate_id}!")
+            self.status_queue.put(
+                ("channel_open", f"Data channel for {subordinate_id} opened")
+            )
 
         @channel.on("message")
         def on_message(message):
-            logger.info("Received message: %s", message)
-            self.status_queue.put(("message", f"Received: {message}"))
+            logger.info(f"Received message from {subordinate_id}: {message}")
+            self.status_queue.put(("message", f"Msg from {subordinate_id}: {message}"))
 
-        # Create offer
+        # Create and send offer
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
 
-        # Send offer with explicit source and target IDs
         message = {
             "type": "offer",
             "sourceId": self.coordinator_id,
-            "targetId": websocket.subordinate_id,
+            "targetId": subordinate_id,
             "offer": {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type},
         }
-        logger.info(f"Sending offer to {websocket.subordinate_id}...")
-        self.status_queue.put(("offer_sent", "WebRTC offer sent"))
-        await websocket.send(json.dumps(message))
+        logger.info(f"Sending offer to {subordinate_id}...")
+        await self.websocket.send(json.dumps(message))
+        self.status_queue.put(("offer_sent", f"WebRTC offer sent to {subordinate_id}"))
 
-        # Listen for messages from signaling server
-        async for message in websocket:
-            data = json.loads(message)
-            logger.info("Received signaling message: %s", data.get("type"))
+    def _start_video_source_if_needed(self):
+        """Starts the shared video source if it's not already running."""
+        if not self._video_source_started:
+            logger.info("--- Starting shared ScreenCaptureSource ---")
+            self.video_source = ScreenCaptureSource(self.loop)
+            self.video_source.start()
+            self._video_source_started = True
+            logger.info("--- Shared ScreenCaptureSource started ---")
 
-            if data.get("type") == "answer":
-                answer = RTCSessionDescription(
-                    sdp=data["answer"]["sdp"], type=data["answer"]["type"]
-                )
-                await pc.setRemoteDescription(answer)
-                self.status_queue.put(("answer_received", "WebRTC answer received"))
-            elif data.get("type") == "ice-candidate":
-                logger.info("Received ICE candidate")
-                candidate_info = data.get("candidate")
-                if candidate_info and candidate_info.get("candidate"):
-                    logger.info(f"  - Candidate info: {candidate_info}")
-                    try:
-                        candidate = RTCIceCandidate(
-                            candidate_info.get("candidate"),
-                            sdpMid=candidate_info.get("sdpMid"),
-                            sdpMLineIndex=candidate_info.get("sdpMLineIndex"),
-                        )
-                        await pc.addIceCandidate(candidate)
-                        logger.info("  - Added ICE candidate")
-                    except Exception as e:
-                        logger.error(f"  - Error adding ICE candidate: {e}")
-                else:
-                    logger.warning("  - Received empty ICE candidate")
-            elif data.get("type") == "registered":
-                pass  # This is our own registration, ignore
+    async def _handle_signaling_message(self, message):
+        """Handles incoming messages from the signaling server."""
+        data = json.loads(message)
+        msg_type = data.get("type")
+        source_id = data.get("sourceId")
+
+        logger.info(
+            f"Received signaling message of type '{msg_type}' from '{source_id}'"
+        )
+
+        if msg_type == "registered":  # Ignore our own registration confirmation
+            return
+
+        connection = self.connections.get(source_id)
+        if not connection:
+            logger.warning(f"Received message for unknown subordinate: {source_id}")
+            return
+
+        pc = connection["pc"]
+
+        if msg_type == "answer":
+            answer = RTCSessionDescription(
+                sdp=data["answer"]["sdp"], type=data["answer"]["type"]
+            )
+            await pc.setRemoteDescription(answer)
+            self.status_queue.put(
+                ("answer_received", f"WebRTC answer from {source_id}")
+            )
+        elif msg_type == "ice-candidate":
+            candidate_info = data.get("candidate")
+            if candidate_info and candidate_info.get("candidate"):
+                try:
+                    candidate = RTCIceCandidate(
+                        candidate_info.get("candidate"),
+                        sdpMid=candidate_info.get("sdpMid"),
+                        sdpMLineIndex=candidate_info.get("sdpMLineIndex"),
+                    )
+                    await pc.addIceCandidate(candidate)
+                except Exception as e:
+                    logger.error(f"Error adding ICE candidate from {source_id}: {e}")
             else:
-                logger.warning("Unknown signaling message type: %s", data.get("type"))
+                logger.warning(f"Received empty ICE candidate from {source_id}")
+
+    async def cleanup_connection(self, subordinate_id):
+        """Cleans up a connection for a given subordinate."""
+        connection = self.connections.pop(subordinate_id, None)
+        if connection:
+            logger.info(f"Cleaning up connection for {subordinate_id}")
+            if self.video_source and connection.get("video_track"):
+                self.video_source.remove_track(connection["video_track"])
+
+            pc = connection["pc"]
+            if pc.connectionState != "closed":
+                await pc.close()
+
+            if not self.connections and self.video_source:
+                logger.info("--- No active connections, stopping video source ---")
+                self.video_source.stop()
+                self.video_source = None
+                self._video_source_started = False
+
+    async def shutdown(self):
+        """Shuts down all connections and the video source."""
+        logger.info("Shutting down coordinator...")
+        subordinate_ids = list(self.connections.keys())
+        for sub_id in subordinate_ids:
+            await self.cleanup_connection(sub_id)
+
+        if self.video_source:
+            self.video_source.stop()
+            self.video_source = None
+
+        if self.websocket:
+            await self.websocket.close()
+
+        logger.info("Shutdown complete.")
 
     def get_status(self):
         """Get the latest status update if available."""
@@ -283,12 +357,28 @@ class Coordinator:
 
 def main():
     parser = argparse.ArgumentParser(description="Python WebRTC coordinator")
-    parser.add_argument("id", help="The ID of the subordinate to connect to")
+    parser.add_argument(
+        "ids", nargs="+", help="The ID(s) of the subordinate(s) to connect to"
+    )
     args = parser.parse_args()
 
-    # Use the Coordinator class for command line usage
     coordinator = Coordinator()
-    coordinator.connect_by_id(args.id)
+    coordinator.start()
+
+    # Wait for registration to complete
+    print("Waiting for coordinator to register with the server...")
+    registered = False
+    while not registered:
+        status = coordinator.get_status()
+        if status:
+            print(f"Status: {status[0]} - {status[1]}")
+            if status[0] == "registered":
+                registered = True
+        time.sleep(0.1)
+
+    # Connect to all specified subordinates
+    for sub_id in args.ids:
+        coordinator.connect_by_id(sub_id)
 
     # Keep the program running to monitor status
     try:
@@ -296,11 +386,20 @@ def main():
             status = coordinator.get_status()
             if status:
                 print(f"Status: {status[0]} - {status[1]}")
-            import time
-
             time.sleep(0.1)
     except KeyboardInterrupt:
-        pass
+        print("\nShutting down...")
+        if coordinator.loop and coordinator.loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                coordinator.shutdown(), coordinator.loop
+            )
+            try:
+                future.result(timeout=5)  # Wait for shutdown to complete
+            except TimeoutError:
+                print("Shutdown timed out.")
+        if coordinator.webrtc_thread:
+            coordinator.webrtc_thread.join(timeout=5)
+        print("Shutdown complete.")
 
 
 if __name__ == "__main__":

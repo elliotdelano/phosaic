@@ -13,8 +13,9 @@ try:
     from components.screen_capture_service import ScreenCaptureService
 except ImportError:
     # Fallback for different import paths
-    import sys
     import os
+    import sys
+
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     from components.screen_capture_service import ScreenCaptureService
 
@@ -41,21 +42,38 @@ class VideoSource(threading.Thread):
 class ScreenCaptureSource(VideoSource):
     """
     Video source that consumes screen frames from the centralized ScreenCaptureService.
-    This source reads frames from the service buffer and sends them to the video track.
+    This source reads frames from the service buffer and sends them to multiple video tracks.
     """
 
-    def __init__(self, video_track, loop, fps=30):
-        super().__init__(video_track, loop)
+    def __init__(self, loop, fps=30):
+        super().__init__(None, loop)  # No specific track upfront
         self.fps = fps
         self.service = ScreenCaptureService()
+        self.tracks = []
+        self.lock = threading.Lock()
+
+    def add_track(self, track):
+        """Adds a video track to the list of tracks to receive frames."""
+        with self.lock:
+            if track not in self.tracks:
+                self.tracks.append(track)
+                logger.info(f"Track added. Total tracks: {len(self.tracks)}")
+
+    def remove_track(self, track):
+        """Removes a video track from the list."""
+        with self.lock:
+            if track in self.tracks:
+                self.tracks.remove(track)
+                logger.info(f"Track removed. Total tracks: {len(self.tracks)}")
 
     def run(self):
-        """Consumes frames from the centralized service and sends them to the video track."""
+        """Consumes frames from the centralized service and sends them to the video tracks."""
         self.running = True
         logger.info("--- ScreenCaptureSource thread started ---")
 
         # Start the centralized service if not already running
         if not self.service.is_running():
+
             def error_callback(error_msg):
                 logger.error(f"Screen capture service error: {error_msg}")
 
@@ -65,7 +83,7 @@ class ScreenCaptureSource(VideoSource):
             self.service.start(
                 fps=self.fps,
                 error_callback=error_callback,
-                max_resolution=max_resolution
+                max_resolution=max_resolution,
             )
 
         frame_time = 1.0 / self.fps
@@ -81,14 +99,14 @@ class ScreenCaptureSource(VideoSource):
                         logger.warning("Frame is not a numpy array, skipping")
                         time.sleep(frame_time)
                         continue
-                        
+
                     if len(frame.shape) != 3 or frame.shape[2] != 3:
                         logger.warning(
                             f"Invalid frame shape: {frame.shape}, expected (H, W, 3), skipping"
                         )
                         time.sleep(frame_time)
                         continue
-                        
+
                     if frame.dtype != np.uint8:
                         logger.warning(
                             f"Invalid frame dtype: {frame.dtype}, expected uint8, skipping"
@@ -101,26 +119,18 @@ class ScreenCaptureSource(VideoSource):
                         f"Shape: {frame.shape}, dtype: {frame.dtype}"
                     )
 
-                    if (
-                        self.video_track
-                        and self.loop
-                        and self.loop.is_running()
-                    ):
-                        logger.debug(
-                            "ScreenCaptureSource: Pushing frame to video track."
-                        )
+                    # Ensure frame is contiguous before sending
+                    if not frame.flags["C_CONTIGUOUS"]:
+                        frame = np.ascontiguousarray(frame)
 
-                        # Ensure frame is contiguous before sending
-                        if not frame.flags['C_CONTIGUOUS']:
-                            frame = np.ascontiguousarray(frame)
-
-                        self.loop.call_soon_threadsafe(
-                            self.video_track.add_frame, frame
-                        )
-                    else:
-                        logger.warning(
-                            "Video track or loop not available, skipping frame"
-                        )
+                    with self.lock:
+                        for track in self.tracks:
+                            if self.loop and self.loop.is_running():
+                                self.loop.call_soon_threadsafe(track.add_frame, frame)
+                            else:
+                                logger.warning(
+                                    "Loop not available, skipping frame for a track"
+                                )
 
                 # Maintain FPS
                 time.sleep(frame_time)
