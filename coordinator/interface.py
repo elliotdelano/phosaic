@@ -5,20 +5,35 @@ Provides a responsive window with camera selector and live camera feed display.
 """
 
 import sys
+
 import cv2
 import numpy as np
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QComboBox, QPushButton,
-                             QSplitter, QFrame, QSizePolicy, QTextEdit)
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QRect
+from PyQt5.QtCore import QRect, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+
+# Import PyQt5 modules before OpenCV
+from PyQt5.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QSplitter,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from vision import QRCodeScanner
 
 from coordinator import Coordinator
-from vision import QRCodeScanner
 
 
 class VideoThread(QThread):
     """Thread for capturing and processing video frames."""
+
     frame_ready = pyqtSignal(object, list)  # frame, qr_codes
 
     def __init__(self, camera_index=0):
@@ -28,7 +43,6 @@ class VideoThread(QThread):
         self.running = False
         self.qr_scanner = QRCodeScanner()
         self.qr_scanner.camera_index = camera_index
-
 
     def run(self):
         """Main thread loop for video capture."""
@@ -78,7 +92,9 @@ class VideoWidget(QWidget):
         # Create QImage from frame
         height, width, channel = rgb_frame.shape
         bytes_per_line = 3 * width
-        q_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        q_image = QImage(
+            rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888
+        )
 
         # Create pixmap and scale it to fit widget while maintaining aspect ratio
         self.pixmap = QPixmap.fromImage(q_image)
@@ -96,7 +112,9 @@ class VideoWidget(QWidget):
         widget_rect = self.rect()
 
         # Scale pixmap to fit widget while maintaining aspect ratio
-        scaled_pixmap = self.pixmap.scaled(widget_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_pixmap = self.pixmap.scaled(
+            widget_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
 
         # Calculate position to center the image
         x = (widget_rect.width() - scaled_pixmap.width()) // 2
@@ -107,9 +125,13 @@ class VideoWidget(QWidget):
 
         # Draw QR code annotations if any exist
         if self.qr_codes and self.current_frame is not None:
-            self.draw_qr_annotations(painter, x, y, scaled_pixmap.width(), scaled_pixmap.height())
+            self.draw_qr_annotations(
+                painter, x, y, scaled_pixmap.width(), scaled_pixmap.height()
+            )
 
-    def draw_qr_annotations(self, painter, offset_x, offset_y, display_width, display_height):
+    def draw_qr_annotations(
+        self, painter, offset_x, offset_y, display_width, display_height
+    ):
         """Draw QR code bounding boxes and information overlays."""
         if not self.current_frame is not None:
             return
@@ -134,7 +156,9 @@ class VideoWidget(QWidget):
                 for j in range(len(scaled_points)):
                     start_point = scaled_points[j]
                     end_point = scaled_points[(j + 1) % len(scaled_points)]
-                    painter.drawLine(start_point[0], start_point[1], end_point[0], end_point[1])
+                    painter.drawLine(
+                        start_point[0], start_point[1], end_point[0], end_point[1]
+                    )
 
                 # Draw corner points
                 painter.setPen(QPen(QColor(0, 0, 255), 5))
@@ -151,7 +175,7 @@ class VideoWidget(QWidget):
                 painter.setFont(font)
                 painter.setPen(QPen(QColor(255, 255, 255)))
 
-                text = f"QR{i+1}: {data[:15]}{'...' if len(data) > 15 else ''}"
+                text = f"QR{i + 1}: {data[:15]}{'...' if len(data) > 15 else ''}"
                 painter.drawText(center_x - 50, center_y - 10, text)
 
     def clear(self):
@@ -358,6 +382,7 @@ def main():
     try:
         import cv2
         from PyQt5.QtWidgets import QApplication
+
         print(f"OpenCV version: {cv2.__version__}")
     except ImportError as e:
         print(f"Error: Missing dependency - {e}")

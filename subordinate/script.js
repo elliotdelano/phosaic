@@ -1,6 +1,7 @@
 const ws = new WebSocket(`ws://${window.location.host}`);
 let peerConnection;
-let uniqueId;
+let myId;
+let coordinatorId; // ID of the coordinator we are talking to
 
 const configuration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -17,10 +18,12 @@ ws.onmessage = async (message) => {
 
   switch (data.type) {
     case "registered":
-      uniqueId = data.id;
-      generateQRCode(uniqueId);
+      myId = data.id;
+      generateQRCode(myId);
       break;
     case "offer":
+      // When we get an offer, store the sender's ID (the coordinator's ID)
+      coordinatorId = data.sourceId;
       await handleOffer(data.offer);
       break;
     case "ice-candidate":
@@ -53,11 +56,12 @@ async function handleOffer(offer) {
 
   peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
+      // Send candidate to the coordinator that sent the offer
       ws.send(
         JSON.stringify({
           type: "ice-candidate",
           candidate: event.candidate,
-          id: uniqueId,
+          targetId: coordinatorId,
         }),
       );
     }
@@ -82,7 +86,16 @@ async function handleOffer(offer) {
     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
-    ws.send(JSON.stringify({ type: "answer", answer: answer, id: uniqueId }));
+
+    // Send the answer back to the specific coordinator
+    ws.send(
+      JSON.stringify({
+        type: "answer",
+        answer: answer,
+        targetId: coordinatorId,
+        sourceId: myId,
+      }),
+    );
   } catch (error) {
     console.error("Error handling offer:", error);
   }

@@ -2,8 +2,8 @@ import argparse
 import asyncio
 import json
 import logging
-import threading
 import queue
+import threading
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from websockets.client import connect
@@ -23,7 +23,9 @@ class Coordinator:
     def connect_by_id(self, subordinate_id):
         """Connect to a subordinate using the given ID."""
         self.current_id = subordinate_id
-        self.status_queue.put(("connecting", f"Connecting to subordinate {subordinate_id}..."))
+        self.status_queue.put(
+            ("connecting", f"Connecting to subordinate {subordinate_id}...")
+        )
 
         # Run the connection in a separate thread to avoid blocking
         thread = threading.Thread(target=self._run_connection, args=(subordinate_id,))
@@ -41,18 +43,37 @@ class Coordinator:
     async def _connect_async(self, subordinate_id):
         """Asynchronous connection logic."""
         uri = "ws://localhost:3000"
+        self.coordinator_id = None
 
         try:
             async with connect(uri) as websocket:
-                websocket.subordinate_id = subordinate_id
+                # 1. Register and get our own ID
+                await websocket.send(json.dumps({"type": "register-coordinator"}))
 
-                await websocket.send(
-                    json.dumps({"type": "register-coordinator", "id": subordinate_id})
-                )
+                # Wait for the registration confirmation
+                message = await websocket.recv()
+                data = json.loads(message)
+                if data.get("type") == "registered":
+                    self.coordinator_id = data["id"]
+                    self.status_queue.put(
+                        (
+                            "registered",
+                            f"Registered with server. Coordinator ID: {self.coordinator_id}",
+                        )
+                    )
+                    logger.info(
+                        f"Registered with server. Coordinator ID: {self.coordinator_id}"
+                    )
+                else:
+                    logger.error(f"Failed to register with server. Response: {data}")
+                    self.status_queue.put(("error", "Failed to register with server"))
+                    return
 
-                self.status_queue.put(("registered", f"Registered as coordinator for {subordinate_id}"))
-
+                # 2. Proceed with connection logic
                 pc = RTCPeerConnection()
+                websocket.subordinate_id = (
+                    subordinate_id  # Keep track of who we are calling
+                )
 
                 try:
                     await self.run(pc, websocket)
@@ -75,7 +96,9 @@ class Coordinator:
                 self.status_queue.put(("failed", "ICE connection failed"))
             elif pc.iceConnectionState == "connected":
                 self.is_connected = True
-                self.status_queue.put(("connected", f"Connected to subordinate {self.current_id}"))
+                self.status_queue.put(
+                    ("connected", f"Connected to subordinate {self.current_id}")
+                )
             elif pc.iceConnectionState == "disconnected":
                 self.is_connected = False
                 self.status_queue.put(("disconnected", "Connection lost"))
@@ -99,13 +122,14 @@ class Coordinator:
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
 
-        # Send offer
+        # Send offer with explicit source and target IDs
         message = {
             "type": "offer",
-            "id": websocket.subordinate_id,
+            "sourceId": self.coordinator_id,
+            "targetId": websocket.subordinate_id,
             "offer": {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type},
         }
-        logger.info("Sending offer...")
+        logger.info(f"Sending offer to {websocket.subordinate_id}...")
         self.status_queue.put(("offer_sent", "WebRTC offer sent"))
         await websocket.send(json.dumps(message))
 
@@ -123,12 +147,9 @@ class Coordinator:
             elif data.get("type") == "ice-candidate":
                 candidate_info = data.get("candidate")
                 if candidate_info:
-                    # aiortc needs candidate, sdpMid, sdpMLineIndex
-                    # sdpMid and sdpMLineIndex might not be present in browser candidates initially
-                    # but are often needed. We assume the browser sends a complete candidate object.
                     await pc.addIceCandidate(candidate_info)
             elif data.get("type") == "registered":
-                pass  # Ignore
+                pass  # This is our own registration, ignore
             else:
                 logger.warning("Unknown signaling message type: %s", data.get("type"))
 
@@ -138,6 +159,7 @@ class Coordinator:
             return self.status_queue.get_nowait()
         except queue.Empty:
             return None
+
 
 def main():
     parser = argparse.ArgumentParser(description="Python WebRTC coordinator")
@@ -155,6 +177,7 @@ def main():
             if status:
                 print(f"Status: {status[0]} - {status[1]}")
             import time
+
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass

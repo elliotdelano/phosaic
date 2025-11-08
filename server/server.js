@@ -14,89 +14,95 @@ const wss = new WebSocketServer({ server });
 const subordinates = new Map();
 const coordinators = new Map();
 
-function generateUniqueId() {
-  return Math.random().toString(36).substring(2, 15);
-}
-
 wss.on("connection", (ws) => {
-  console.log("Client connected");
+  // Assign a unique ID to every connection
+  ws.id = Math.random().toString(36).substring(2, 15);
+  console.log(`Client connected with ID: ${ws.id}`);
 
   ws.on("message", (message) => {
     const data = JSON.parse(message);
     console.log("received: %s", JSON.stringify(data, null, 2));
 
     switch (data.type) {
-      case "register-subordinate": {
-        const id = generateUniqueId();
-        ws.id = id;
-        subordinates.set(id, ws);
-        console.log(`Subordinate registered with id ${id}`);
-        ws.send(JSON.stringify({ type: "registered", id: id }));
+      case "register-subordinate":
+        subordinates.set(ws.id, ws);
+        console.log(`Registered subordinate with ID: ${ws.id}`);
+        ws.send(JSON.stringify({ type: "registered", id: ws.id }));
         break;
-      }
-      case "register-coordinator": {
-        const id = data.id;
-        ws.id = id;
-        coordinators.set(id, ws);
-        console.log(`Coordinator registered for id ${id}`);
-        break;
-      }
-      case "offer": {
-        const subordinate = subordinates.get(data.id);
-        if (subordinate) {
-          console.log(`Forwarding offer to subordinate ${data.id}`);
-          subordinate.send(
-            JSON.stringify({ type: "offer", offer: data.offer }),
-          );
-        } else {
-          console.log(`Subordinate ${data.id} not found`);
-        }
-        break;
-      }
-      case "answer": {
-        const coordinator = coordinators.get(data.id);
-        if (coordinator) {
-          console.log(`Forwarding answer to coordinator for ${data.id}`);
-          coordinator.send(
-            JSON.stringify({ type: "answer", answer: data.answer }),
-          );
-        } else {
-          console.log(`Coordinator for ${data.id} not found`);
-        }
-        break;
-      }
-      case "ice-candidate": {
-        const target = subordinates.has(data.id)
-          ? subordinates.get(data.id)
-          : coordinators.get(data.id);
-        const source = subordinates.has(ws.id) ? "subordinate" : "coordinator";
 
+      case "register-coordinator":
+        coordinators.set(ws.id, ws);
+        console.log(`Registered coordinator with ID: ${ws.id}`);
+        ws.send(JSON.stringify({ type: "registered", id: ws.id }));
+        break;
+
+      case "offer": {
+        const subordinate = subordinates.get(data.targetId);
+        if (subordinate) {
+          console.log(
+            `Forwarding offer from ${data.sourceId} to ${data.targetId}`,
+          );
+          subordinate.send(
+            JSON.stringify({
+              type: "offer",
+              offer: data.offer,
+              sourceId: data.sourceId, // Let subordinate know who to reply to
+            }),
+          );
+        } else {
+          console.log(`Subordinate ${data.targetId} not found`);
+        }
+        break;
+      }
+
+      case "answer": {
+        const coordinator = coordinators.get(data.targetId);
+        if (coordinator) {
+          console.log(
+            `Forwarding answer from ${data.sourceId} to ${data.targetId}`,
+          );
+          coordinator.send(
+            JSON.stringify({
+              type: "answer",
+              answer: data.answer,
+              sourceId: data.sourceId,
+            }),
+          );
+        } else {
+          console.log(`Coordinator ${data.targetId} not found`);
+        }
+        break;
+      }
+
+      case "ice-candidate": {
+        const targetId = data.targetId;
+        // Find the target in either map
+        const target = coordinators.get(targetId) || subordinates.get(targetId);
         if (target) {
-          console.log(`Forwarding ICE candidate to ${data.id} from ${source}`);
+          console.log(`Forwarding ICE candidate from ${ws.id} to ${targetId}`);
           target.send(
             JSON.stringify({
               type: "ice-candidate",
               candidate: data.candidate,
+              sourceId: ws.id,
             }),
           );
+        } else {
+          console.log(`ICE candidate target ${targetId} not found`);
         }
         break;
       }
+
       default:
         console.log("Unknown message type:", data.type);
     }
   });
 
   ws.on("close", () => {
-    console.log("Client disconnected");
-    if (subordinates.has(ws.id)) {
-      subordinates.delete(ws.id);
-      console.log(`Subordinate ${ws.id} unregistered`);
-    }
-    if (coordinators.has(ws.id)) {
-      coordinators.delete(ws.id);
-      console.log(`Coordinator for ${ws.id} unregistered`);
-    }
+    console.log(`Client disconnected: ${ws.id}`);
+    // Remove from both maps, it will only be in one
+    subordinates.delete(ws.id);
+    coordinators.delete(ws.id);
   });
 });
 
