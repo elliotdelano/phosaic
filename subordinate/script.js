@@ -221,6 +221,8 @@ async function handleFullscreenComplete() {
 	console.log(
 		`[Subordinate] Captured display size after fullscreen: width=${displaySize.width}, height=${displaySize.height}`
 	);
+	// Enable refresh on tap when entering fullscreen
+	enableRefreshOnTap();
 	// Connect WebSocket after capturing display size
 	connectWebSocket();
 }
@@ -232,7 +234,13 @@ function handleFullscreenChange() {
 			waitForFullscreenComplete().then(() => {
 				handleFullscreenComplete();
 			});
+		} else {
+			// Already initialized, just enable refresh on tap
+			enableRefreshOnTap();
 		}
+	} else {
+		// Exited fullscreen, disable refresh on tap
+		disableRefreshOnTap();
 	}
 }
 
@@ -252,34 +260,29 @@ function generateQRCode(id) {
 	qrCodeElement.innerHTML = qr.createImgTag(10, 0);
 	setQRCodeSize();
 	qrCodeDisplayed = true;
-	enableRefreshOnTap();
+	// Refresh on tap is already enabled in handleFullscreenComplete()
 }
 
 function enableRefreshOnTap() {
-	// Remove any existing handler
-	// disableRefreshOnTap();
+	// Remove any existing handler first to avoid duplicates
+	disableRefreshOnTap();
 
 	// Create handler that exits fullscreen then refreshes the page
 	refreshHandler = async () => {
-		if (qrCodeDisplayed) {
+		// Only refresh if we're in fullscreen
+		if (isFullscreen()) {
 			// Disable the handler immediately to prevent multiple taps
 			disableRefreshOnTap();
 
-			// Exit fullscreen if we're in it
-			if (isFullscreen()) {
-				try {
-					await exitFullscreen();
-					// Wait a brief moment for fullscreen to fully exit
-					setTimeout(() => {
-						window.location.reload();
-					}, 100);
-				} catch (err) {
-					console.error("Failed to exit fullscreen:", err);
-					// Refresh anyway even if exit failed
+			try {
+				await exitFullscreen();
+				// Wait a brief moment for fullscreen to fully exit
+				setTimeout(() => {
 					window.location.reload();
-				}
-			} else {
-				// Not in fullscreen, refresh immediately
+				}, 100);
+			} catch (err) {
+				console.error("Failed to exit fullscreen:", err);
+				// Refresh anyway even if exit failed
 				window.location.reload();
 			}
 		}
@@ -314,7 +317,7 @@ async function handleOffer(offer) {
 			qrCodeElement.style.display = "none";
 			videoElement.style.display = "block";
 			qrCodeDisplayed = false;
-			disableRefreshOnTap();
+			// Don't disable refresh on tap - keep it active while in fullscreen
 			console.log(
 				"Video element srcObject set with new MediaStream. Attempting to play..."
 			);
