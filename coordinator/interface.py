@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self.screen_capture_manager = ScreenCaptureManager()
         self.video_file_manager = VideoFileManager()
         self.connection_manager = ConnectionManager(self.coordinator)
+        self.connected_ids = set()  # Track connected subordinate IDs
 
         self.init_ui()
         self.connect_signals()
@@ -182,6 +183,96 @@ class MainWindow(QMainWindow):
 
         # Connection signals
         self.connection_manager.status_update.connect(self.append_status_message)
+
+    def on_camera_frame_ready(self, frame, qr_codes):
+        """Handle new frame from camera, display it, and process QR codes."""
+        # Display the camera feed
+        self.camera_interface.on_frame_ready(frame, qr_codes)
+
+        # Process QR codes for projection mapping
+        if not qr_codes:
+            return
+
+        for data, points in qr_codes:
+            if not data:
+                continue
+
+            try:
+                qr_json = json.loads(data)
+                subordinate_id = qr_json.get("id")
+                if not subordinate_id:
+                    self.append_status_message(
+                        f"Warning: QR code missing 'id' field: {data}"
+                    )
+                    continue
+
+                if subordinate_id in self.connected_ids:
+                    continue
+
+                self.append_status_message(f"New QR code detected: {subordinate_id}")
+
+                # Get video size from the active source (screen capture or video file)
+                screen_size = None
+                source_type_index = self.source_type_combo.currentIndex()
+                
+                if source_type_index == 0:  # Screen Capture
+                    screen_size = self.screen_capture_manager.get_screen_size()
+                    if not screen_size:
+                        self.append_status_message(
+                            "[ERROR] Screen size not available. Is screen capture running?"
+                        )
+                        continue
+                else:  # Video File
+                    screen_size = self.video_file_manager.get_video_size()
+                    if not screen_size:
+                        self.append_status_message(
+                            "[ERROR] Video size not available. Is video file playback running?"
+                        )
+                        continue
+
+                camera_height, camera_width, _ = frame.shape
+                camera_size = (camera_width, camera_height)
+
+                mapper = ProjectionMapper(screen_size, camera_size)
+                screen_points = mapper.map_points(points)
+
+                # Define the destination rectangle (default 640x480, configurable)
+                output_size = (640, 480)  # (width, height)
+                dst_rect = np.float32([
+                    [0, 0],
+                    [output_size[0], 0],
+                    [output_size[0], output_size[1]],
+                    [0, output_size[1]]
+                ])
+
+                # Ensure screen_points is in the right shape (4, 2)
+                if screen_points is None or screen_points.shape[0] != 4:
+                    self.append_status_message(
+                        f"[ERROR] Could not calculate a valid projection for {subordinate_id} (need 4 points)"
+                    )
+                    continue
+                if len(screen_points.shape) == 3:
+                    screen_points = np.squeeze(screen_points, axis=1)
+
+                # Calculate the perspective transform matrix
+                warp_matrix = cv2.getPerspectiveTransform(np.float32(screen_points), dst_rect)
+
+                self.append_status_message(
+                    f"Calculated perspective warp for {subordinate_id}."
+                )
+                self.append_status_message(
+                    f"Initiating connection to {subordinate_id}..."
+                )
+
+                self.coordinator.connect_by_id(subordinate_id, warp_matrix=warp_matrix, output_size=output_size)
+                self.connected_ids.add(subordinate_id)
+
+            except json.JSONDecodeError:
+                self.append_status_message(f"Warning: Invalid JSON in QR code: {data}")
+                continue
+            except Exception as e:
+                self.append_status_message(f"Error processing QR code: {e}")
+                continue
 
     def toggle_camera(self):
         """Toggle camera and update UI."""

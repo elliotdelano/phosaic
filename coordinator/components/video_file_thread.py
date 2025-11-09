@@ -27,6 +27,8 @@ class VideoFileThread(QThread):
         self.cap = None
         self.mutex = QMutex()
         self.condition = QWaitCondition()
+        self.frame_width = None
+        self.frame_height = None
 
     def run(self):
         """Main thread loop for reading frames from video file."""
@@ -42,8 +44,8 @@ class VideoFileThread(QThread):
 
             # Get video properties
             video_fps = self.cap.get(cv2.CAP_PROP_FPS)
-            frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             # Use video FPS if not specified
             if self.fps is None:

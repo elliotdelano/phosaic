@@ -174,3 +174,13 @@ class VideoFileManager(QObject):
         if self.video_file_thread:
             self.video_file_thread.stop()
             self.video_file_thread = None
+
+    def get_video_size(self):
+        """Get the video size from the video file thread."""
+        if (self.video_file_thread 
+            and self.video_file_thread.frame_width is not None 
+            and self.video_file_thread.frame_height is not None
+            and self.video_file_thread.frame_width > 0 
+            and self.video_file_thread.frame_height > 0):
+            return (self.video_file_thread.frame_width, self.video_file_thread.frame_height)
+        return None
