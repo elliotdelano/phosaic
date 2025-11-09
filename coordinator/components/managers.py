@@ -47,6 +47,7 @@ class CameraManager(QObject):
                 self.current_camera_index = int(self.available_cameras[0].split(" ")[1])
             except (ValueError, IndexError):
                 self.current_camera_index = 0
+
     def set_camera(self, index):
         """Set the current camera based on combo box index."""
         if index < 0 or index >= len(self.available_cameras):
@@ -127,47 +128,8 @@ class ScreenCaptureManager(QObject):
             self.screen_capture_thread.stop()
             self.screen_capture_thread = None
 
-
-class ConnectionManager(QObject):
-    """Manages QR code detection and WebRTC connection logic."""
-
-    status_update = pyqtSignal(str)
-
-    def __init__(self, coordinator, parent=None):
-        super().__init__(parent)
-        self.coordinator = coordinator
-        self.connected_ids = set()
-
-    def handle_qr_code_detection(self, qr_codes):
-        """Handle QR code detection."""
-        for data, _ in qr_codes:
-            if not data:
-                continue
-            try:
-                qr_json = json.loads(data)
-                subordinate_id = qr_json.get("id")
-                if not subordinate_id:
-                    self.status_update.emit(
-                        f"Warning: QR code missing 'id' field: {data}"
-                    )
-                    continue
-
-                if subordinate_id not in self.connected_ids:
-                    self.status_update.emit(
-                        f"QR Code detected with ID: {subordinate_id}"
-                    )
-                    self.status_update.emit("Initiating peer connection...")
-                    self.coordinator.connect_by_id(subordinate_id)
-                    self.connected_ids.add(subordinate_id)
-                else:
-                    self.status_update.emit(
-                        f"Already connected to ID: {subordinate_id}"
-                    )
-                    self.status_update.emit(f"Already connected to ID: {subordinate_id}")
-
-            except json.JSONDecodeError:
-                self.status_update.emit(f"Warning: Invalid JSON in QR code: {data}")
-                continue
-            except Exception as e:
-                self.status_update.emit(f"Error processing QR code: {e}")
-                continue
+    def get_screen_size(self):
+        """Get the screen size from the screen capture service."""
+        if self.screen_capture_thread:
+            return self.screen_capture_thread.service.get_screen_size()
+        return None
