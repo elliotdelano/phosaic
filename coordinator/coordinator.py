@@ -8,6 +8,7 @@ import time
 from concurrent.futures import TimeoutError
 
 import av
+import cv2
 from aiortc import RTCIceCandidate, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import VideoStreamTrack
 from video_source import ScreenCaptureSource, VideoFileSource
@@ -17,80 +18,62 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+
 class RTCVideoStreamTrack(VideoStreamTrack):
     """
-    A video track that receives frames from an external source like a queue.
+    A video track that receives frames from an external source, performs a
+    perspective warp if specified, and queues them for sending.
     """
 
     kind = "video"
 
-    def __init__(self):
+    def __init__(self, warp_matrix=None, output_size=(640, 480)):
         super().__init__()
         self.queue = asyncio.Queue(maxsize=1)
+        self.warp_matrix = warp_matrix
+        self.output_size = output_size if output_size is not None else (640, 480)
 
     async def recv(self):
         """Receives the next frame from the queue and returns it as a VideoFrame."""
-        logger.debug("RTCVideoStreamTrack: Waiting for frame from queue...")
         frame = await self.queue.get()
-        logger.debug(
-            f"RTCVideoStreamTrack: Frame received from queue. "
-            f"Shape: {frame.shape if hasattr(frame, 'shape') else 'unknown'}, "
-            f"dtype: {frame.dtype if hasattr(frame, 'dtype') else 'unknown'}"
-        )
 
         try:
             pts, time_base = await self.next_timestamp()
             video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
             video_frame.pts = pts
             video_frame.time_base = time_base
-            logger.debug("RTCVideoStreamTrack: Returning VideoFrame with pts=%s", pts)
             return video_frame
         except Exception as e:
-            logger.error(
-                f"RTCVideoStreamTrack: Error creating VideoFrame: {e}. "
-                f"Frame shape: {frame.shape if hasattr(frame, 'shape') else 'unknown'}, "
-                f"dtype: {frame.dtype if hasattr(frame, 'dtype') else 'unknown'}"
-            )
-            # Return a black frame as fallback
-            import numpy as np
-
-            fallback_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            pts, time_base = await self.next_timestamp()
-            video_frame = av.VideoFrame.from_ndarray(fallback_frame, format="bgr24")
-            video_frame.pts = pts
-            video_frame.time_base = time_base
-            return video_frame
+            logger.error(f"RTCVideoStreamTrack: Error creating VideoFrame: {e}")
+            return None
 
     def add_frame(self, frame):
-        """Adds a frame to the queue, discarding an old one if full."""
+        """
+        Adds a frame to the queue, warping it first if a warp_matrix is set.
+        Discards an old frame if the queue is full.
+        """
         try:
-            # Validate frame before adding to queue
             if frame is None:
-                logger.warning(
-                    "RTCVideoStreamTrack: Attempted to add None frame, skipping"
-                )
                 return
 
-            if not hasattr(frame, "shape") or not hasattr(frame, "dtype"):
-                logger.warning(
-                    f"RTCVideoStreamTrack: Invalid frame type: {type(frame)}, skipping"
+            # Warp the frame if a matrix is defined
+            if self.warp_matrix is not None and self.output_size is not None:
+                warped_frame = cv2.warpPerspective(
+                    frame, self.warp_matrix, self.output_size
                 )
-                return
+                processed_frame = warped_frame
+            else:
+                # If no warp is specified, use the frame as is
+                processed_frame = frame
 
-            if len(frame.shape) != 3 or frame.shape[2] != 3:
-                logger.warning(
-                    f"RTCVideoStreamTrack: Invalid frame shape: {frame.shape}, "
-                    f"expected (H, W, 3), skipping"
-                )
+            if not hasattr(processed_frame, "shape") or len(processed_frame.shape) != 3:
+                logger.warning("Invalid frame after processing, skipping.")
                 return
 
             if self.queue.full():
                 self.queue.get_nowait()
-            self.queue.put_nowait(frame)
-            logger.debug(
-                f"RTCVideoStreamTrack: Frame added to queue. Queue size: {self.queue.qsize()}, "
-                f"shape: {frame.shape}, dtype: {frame.dtype}"
-            )
+
+            self.queue.put_nowait(processed_frame)
         except Exception as e:
             logger.error(f"RTCVideoStreamTrack: Error adding frame to queue: {e}")
 
@@ -162,8 +145,8 @@ class Coordinator:
         else:
             raise Exception(f"Failed to register with server. Response: {data}")
 
-    def connect_by_id(self, subordinate_id):
-        """Connect to a subordinate using the given ID."""
+    def connect_by_id(self, subordinate_id, warp_matrix=None, output_size=None):
+        """Connect to a subordinate using the given ID and optional warp parameters."""
         if not self.loop or not self.loop.is_running():
             self.status_queue.put(
                 ("error", "Coordinator not started. Call start() first.")
@@ -177,14 +160,21 @@ class Coordinator:
             )
             return
 
+        # Set default output size if not provided
+        if output_size is None:
+            output_size = (640, 480)
+
         self.status_queue.put(
             ("connecting", f"Connecting to subordinate {subordinate_id}...")
         )
         asyncio.run_coroutine_threadsafe(
-            self._create_peer_connection(subordinate_id), self.loop
+            self._create_peer_connection(subordinate_id, warp_matrix, output_size),
+            self.loop,
         )
 
-    async def _create_peer_connection(self, subordinate_id):
+    async def _create_peer_connection(
+        self, subordinate_id, warp_matrix=None, output_size=None
+    ):
         """Creates and sets up a new RTCPeerConnection."""
         if subordinate_id in self.connections:
             logger.warning(
@@ -192,14 +182,22 @@ class Coordinator:
             )
             return
 
+        # Set default output size if not provided
+        if output_size is None:
+            output_size = (640, 480)
+
         pc = RTCPeerConnection()
-        video_track = RTCVideoStreamTrack()
+        video_track = RTCVideoStreamTrack(
+            warp_matrix=warp_matrix, output_size=output_size
+        )
         pc.addTrack(video_track)
 
         self.connections[subordinate_id] = {
             "pc": pc,
             "video_track": video_track,
             "status": "connecting",
+            "warp_matrix": warp_matrix,
+            "output_size": output_size,
         }
 
         await self._setup_pc_handlers_and_offer(pc, subordinate_id)

@@ -4,8 +4,10 @@ Main application window for the Phosaic coordinator GUI.
 """
 
 import asyncio
+import json
 import sys
-
+import cv2
+import numpy as np
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QApplication,
@@ -32,6 +34,7 @@ from components.managers import (
     VideoFileManager,
 )
 from components.screen_capture_widget import ScreenCaptureWidget
+from projection import ProjectionMapper
 
 from coordinator import Coordinator
 
@@ -42,7 +45,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # Initialize Coordinator and Managers
+        # Initialize Core Components
         self.coordinator = Coordinator()
         self.camera_manager = CameraManager()
         self.screen_capture_manager = ScreenCaptureManager()
@@ -73,15 +76,12 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Top control panel
         control_panel = self.create_control_panel()
         main_layout.addWidget(control_panel)
 
-        # Main content area with video feeds
         video_container = self.create_video_display_area()
         main_layout.addWidget(video_container, 1)
 
-        # Status log
         self.status_text = QTextEdit()
         self.status_text.setMaximumHeight(150)
         self.status_text.setReadOnly(True)
@@ -107,11 +107,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
 
-        # Create camera feed component from the refactored class
         self.camera_interface = CameraInterface()
         layout.addWidget(self.camera_interface, 1)
 
-        # Create screen capture component
         self.screen_capture_group = self.create_screen_capture_group()
         layout.addWidget(self.screen_capture_group, 1)
 
@@ -167,10 +165,7 @@ class MainWindow(QMainWindow):
         self.camera_manager.cameras_enumerated.connect(
             self.camera_interface.on_cameras_enumerated
         )
-        self.camera_manager.frame_ready.connect(self.camera_interface.on_frame_ready)
-        self.camera_interface.qr_detected.connect(
-            self.connection_manager.handle_qr_code_detection
-        )
+        self.camera_manager.frame_ready.connect(self.on_camera_frame_ready)
 
         # Screen capture signals
         self.screen_start_stop_btn.clicked.connect(self.toggle_screen_capture)
@@ -354,7 +349,7 @@ class MainWindow(QMainWindow):
 
     def append_status_message(self, message):
         """Append a message to the status text box."""
-        self.status_text.append(message)
+        self.status_text.append(str(message))
         scrollbar = self.status_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
