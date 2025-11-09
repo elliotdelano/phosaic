@@ -1,25 +1,25 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>QR Code Display</title>
-        <link rel="stylesheet" href="style.css" />
-    </head>
-    <body>
-        <div id="fullscreen-prompt" class="hidden">
-            <p>Tap the screen to enter fullscreen</p>
-        </div>
-        <div id="container">
-            <div id="qrcode"></div>
-            <video
-                id="video"
-                autoplay
-                playsinline
-                style="display: none; width: 100%; height: 100%"
-            ></video>
-        </div>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
-        <script src="script.js"></script>
-    </body>
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>QR Code Display</title>
+		<link rel="stylesheet" href="style.css" />
+	</head>
+	<body>
+		<div id="fullscreen-prompt" class="hidden">
+			<p>Tap the screen to begin<br />(Tap again to exit)</p>
+		</div>
+		<div id="container">
+			<div id="qrcode"></div>
+			<video
+				id="video"
+				autoplay
+				playsinline
+				style="display: none; width: 100%; height: 100%"
+			></video>
+		</div>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+		<script src="script.js"></script>
+	</body>
 </html>

@@ -14,56 +14,58 @@ function connectWebSocket() {
 	if (ws) {
 		return; // Already connected or connecting
 	}
-	
+
 	if (!displaySize) {
 		console.error("Display size not captured before connection");
 		return;
 	}
-	
+
 	ws = new WebSocket(`ws://${window.location.host}`);
 
-ws.onopen = () => {
-	console.log("Connected to signaling server");
+	ws.onopen = () => {
+		console.log("Connected to signaling server");
 		// Use display size captured right after fullscreen
-	console.log(
+		console.log(
 			`[Subordinate] Reporting display size: width=${displaySize.width}, height=${displaySize.height}`
-	);
-		ws.send(JSON.stringify({ 
-			type: "register-subordinate", 
-			width: displaySize.width, 
-			height: displaySize.height 
-		}));
-};
+		);
+		ws.send(
+			JSON.stringify({
+				type: "register-subordinate",
+				width: displaySize.width,
+				height: displaySize.height,
+			})
+		);
+	};
 
-ws.onmessage = async (message) => {
-	const data = JSON.parse(message.data);
-	console.log("Received signaling message:", data.type);
+	ws.onmessage = async (message) => {
+		const data = JSON.parse(message.data);
+		console.log("Received signaling message:", data.type);
 
-	switch (data.type) {
-		case "registered":
-			myId = data.id;
+		switch (data.type) {
+			case "registered":
+				myId = data.id;
 				generateQRCode(data.id);
-			break;
-		case "offer":
-			// When we get an offer, store the sender's ID (the coordinator's ID)
-			coordinatorId = data.sourceId;
-			await handleOffer(data.offer);
-			break;
-		case "ice-candidate":
-			if (peerConnection) {
-				try {
-					await peerConnection.addIceCandidate(
-						new RTCIceCandidate(data.candidate)
-					);
-				} catch (e) {
-					console.error("Error adding received ice candidate", e);
+				break;
+			case "offer":
+				// When we get an offer, store the sender's ID (the coordinator's ID)
+				coordinatorId = data.sourceId;
+				await handleOffer(data.offer);
+				break;
+			case "ice-candidate":
+				if (peerConnection) {
+					try {
+						await peerConnection.addIceCandidate(
+							new RTCIceCandidate(data.candidate)
+						);
+					} catch (e) {
+						console.error("Error adding received ice candidate", e);
+					}
 				}
-			}
-			break;
-		default:
-			console.log("Unknown message type:", data.type);
-	}
-};
+				break;
+			default:
+				console.log("Unknown message type:", data.type);
+		}
+	};
 
 	ws.onclose = () => {
 		console.log("Disconnected from signaling server");
@@ -154,7 +156,7 @@ function waitForFullscreenComplete() {
 				});
 			}
 		};
-		
+
 		// Check immediately in case we're already in fullscreen
 		if (isFullscreen()) {
 			checkFullscreen();
@@ -168,7 +170,7 @@ function waitForFullscreenComplete() {
 				document.removeEventListener("mozfullscreenchange", handler);
 				document.removeEventListener("MSFullscreenChange", handler);
 			};
-			
+
 			document.addEventListener("fullscreenchange", handler);
 			document.addEventListener("webkitfullscreenchange", handler);
 			document.addEventListener("mozfullscreenchange", handler);
@@ -180,7 +182,7 @@ function waitForFullscreenComplete() {
 function showFullscreenPrompt() {
 	const prompt = document.getElementById("fullscreen-prompt");
 	prompt.classList.remove("hidden");
-	
+
 	// Add click/touch handler to enter fullscreen
 	const handleInteraction = async () => {
 		try {
@@ -193,7 +195,7 @@ function showFullscreenPrompt() {
 			console.error("Failed to enter fullscreen:", err);
 		}
 	};
-	
+
 	prompt.onclick = handleInteraction;
 	prompt.ontouchstart = handleInteraction;
 }
@@ -208,13 +210,13 @@ function hideFullscreenPrompt() {
 async function handleFullscreenComplete() {
 	hideFullscreenPrompt();
 
-  //wait for system animations outside the browser to complete
-  await new Promise(resolve => setTimeout(resolve, 200)); 
-	
-  // Capture display size after fullscreen has finished resizing
+	//wait for system animations outside the browser to complete
+	await new Promise((resolve) => setTimeout(resolve, 200));
+
+	// Capture display size after fullscreen has finished resizing
 	displaySize = {
 		width: window.innerWidth,
-		height: window.innerHeight
+		height: window.innerHeight,
 	};
 	console.log(
 		`[Subordinate] Captured display size after fullscreen: width=${displaySize.width}, height=${displaySize.height}`
@@ -255,14 +257,14 @@ function generateQRCode(id) {
 
 function enableRefreshOnTap() {
 	// Remove any existing handler
-	disableRefreshOnTap();
-	
+	// disableRefreshOnTap();
+
 	// Create handler that exits fullscreen then refreshes the page
 	refreshHandler = async () => {
 		if (qrCodeDisplayed) {
 			// Disable the handler immediately to prevent multiple taps
 			disableRefreshOnTap();
-			
+
 			// Exit fullscreen if we're in it
 			if (isFullscreen()) {
 				try {
@@ -282,7 +284,7 @@ function enableRefreshOnTap() {
 			}
 		}
 	};
-	
+
 	// Add event listeners for both click and touch
 	document.addEventListener("click", refreshHandler);
 	document.addEventListener("touchend", refreshHandler);
@@ -363,7 +365,11 @@ async function handleOffer(offer) {
 			// Send subordinate-info with display size via data channel
 			const width = window.innerWidth;
 			const height = window.innerHeight;
-			const infoMsg = JSON.stringify({ type: "subordinate-info", width, height });
+			const infoMsg = JSON.stringify({
+				type: "subordinate-info",
+				width,
+				height,
+			});
 			receiveChannel.send(infoMsg);
 			receiveChannel.send("Hello from subordinate!");
 		};
@@ -381,14 +387,14 @@ async function handleOffer(offer) {
 
 		// Send the answer back to the specific coordinator
 		if (ws) {
-		ws.send(
-			JSON.stringify({
-				type: "answer",
-				answer: answer,
-				targetId: coordinatorId,
-				sourceId: myId,
-			})
-		);
+			ws.send(
+				JSON.stringify({
+					type: "answer",
+					answer: answer,
+					targetId: coordinatorId,
+					sourceId: myId,
+				})
+			);
 		}
 	} catch (error) {
 		console.error("Error handling offer:", error);
