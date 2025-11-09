@@ -11,8 +11,9 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const subordinates = new Map();
-const coordinators = new Map();
+const subordinates = new Map(); // WebSocket connections
+const coordinators = new Map(); // WebSocket connections
+const subordinateInfo = new Map(); // subordinate_id -> { width, height }
 
 wss.on("connection", (ws) => {
 	// Assign a unique ID to every connection
@@ -26,7 +27,12 @@ wss.on("connection", (ws) => {
 		switch (data.type) {
 			case "register-subordinate":
 				subordinates.set(ws.id, ws);
-				console.log(`Registered subordinate with ID: ${ws.id}`);
+				// Store subordinate display size info
+				subordinateInfo.set(ws.id, {
+					width: data.width,
+					height: data.height,
+				});
+				console.log(`Registered subordinate with ID: ${ws.id} (${data.width}x${data.height})`);
 				ws.send(
 					JSON.stringify({
 						type: "registered",
@@ -103,6 +109,36 @@ wss.on("connection", (ws) => {
 				break;
 			}
 
+			case "get-subordinate-info": {
+				// Coordinator requesting subordinate display size info
+				const info = subordinateInfo.get(data.subordinateId);
+				if (info) {
+					console.log(
+						`Sending subordinate info for ${data.subordinateId} to coordinator ${ws.id}`
+					);
+					ws.send(
+						JSON.stringify({
+							type: "subordinate-info",
+							subordinateId: data.subordinateId,
+							width: info.width,
+							height: info.height,
+						})
+					);
+				} else {
+					console.log(
+						`Subordinate info not found for ${data.subordinateId}`
+					);
+					ws.send(
+						JSON.stringify({
+							type: "subordinate-info",
+							subordinateId: data.subordinateId,
+							error: "Subordinate not found or not registered",
+						})
+					);
+				}
+				break;
+			}
+
 			default:
 				console.log("Unknown message type:", data.type);
 		}
@@ -113,6 +149,8 @@ wss.on("connection", (ws) => {
 		// Remove from both maps, it will only be in one
 		subordinates.delete(ws.id);
 		coordinators.delete(ws.id);
+		// Also remove from subordinate info if it was a subordinate
+		subordinateInfo.delete(ws.id);
 	});
 });
 

@@ -230,25 +230,6 @@ class MainWindow(QMainWindow):
                 mapper = ProjectionMapper(screen_size, camera_size)
                 screen_points = mapper.map_points(points)
 
-                # Try to get the subordinate's display size from the coordinator
-                output_size = (640, 480)  # default
-                dst_rect = np.float32([
-                    [0, 0],
-                    [output_size[0], 0],
-                    [output_size[0], output_size[1]],
-                    [0, output_size[1]]
-                ])
-                if hasattr(self.coordinator, "subordinate_display_sizes"):
-                    display_size = self.coordinator.subordinate_display_sizes.get(subordinate_id)
-                    if display_size and isinstance(display_size, (tuple, list)) and len(display_size) == 2:
-                        output_size = (int(display_size[0]), int(display_size[1]))
-                        dst_rect = np.float32([
-                            [0, 0],
-                            [output_size[0], 0],
-                            [output_size[0], output_size[1]],
-                            [0, output_size[1]]
-                        ])
-
                 # Ensure screen_points is in the right shape (4, 2)
                 if screen_points is None or screen_points.shape[0] != 4:
                     self.append_status_message(
@@ -258,17 +239,22 @@ class MainWindow(QMainWindow):
                 if len(screen_points.shape) == 3:
                     screen_points = np.squeeze(screen_points, axis=1)
 
-                # Calculate the perspective transform matrix
-                warp_matrix = cv2.getPerspectiveTransform(np.float32(screen_points), dst_rect)
+                # Store a copy of screen_points for warp matrix calculation
+                screen_points_copy = np.float32(screen_points.copy())
 
                 self.append_status_message(
-                    f"Calculated perspective warp for {subordinate_id}."
-                )
-                self.append_status_message(
-                    f"Initiating connection to {subordinate_id}..."
+                    f"Detected QR code for {subordinate_id}. Requesting display size..."
                 )
 
-                self.coordinator.connect_by_id(subordinate_id, warp_matrix=warp_matrix, output_size=output_size)
+                # Pass screen_points and screen_size so coordinator can map the entire screen
+                # The coordinator will recalculate the warp matrix with the correct display size
+                self.coordinator.connect_by_id(
+                    subordinate_id, 
+                    warp_matrix=None,  # Will be calculated when display size is received
+                    output_size=None,  # Will be requested from server
+                    screen_points=screen_points_copy,
+                    source_screen_size=screen_size  # Pass source screen size for full-screen mapping
+                )
                 self.connected_ids.add(subordinate_id)
 
             except json.JSONDecodeError:

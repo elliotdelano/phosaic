@@ -9,6 +9,7 @@ from concurrent.futures import TimeoutError
 
 import av
 import cv2
+import numpy as np
 from aiortc import RTCIceCandidate, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import VideoStreamTrack
 from video_source import ScreenCaptureSource, VideoFileSource
@@ -146,7 +147,7 @@ class Coordinator:
         else:
             raise Exception(f"Failed to register with server. Response: {data}")
 
-    def connect_by_id(self, subordinate_id, warp_matrix=None, output_size=None):
+    def connect_by_id(self, subordinate_id, warp_matrix=None, output_size=None, screen_points=None, source_screen_size=None):
         """Connect to a subordinate using the given ID and optional warp parameters."""
         if not self.loop or not self.loop.is_running():
             self.status_queue.put(
@@ -161,20 +162,33 @@ class Coordinator:
             )
             return
 
-        # Set default output size if not provided
+        # If output_size is not provided, try to get it from stored display sizes
+        # or request it from the server
         if output_size is None:
-            output_size = (640, 480)
+            if subordinate_id in self.subordinate_display_sizes:
+                output_size = self.subordinate_display_sizes[subordinate_id]
+                logger.info(f"Using stored display size for {subordinate_id}: {output_size}")
+            else:
+                # Request display size from server before connecting
+                self.status_queue.put(
+                    ("info", f"Requesting display size for {subordinate_id}...")
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self._request_subordinate_info_and_connect(subordinate_id, warp_matrix, screen_points, source_screen_size),
+                    self.loop,
+                )
+                return
 
         self.status_queue.put(
             ("connecting", f"Connecting to subordinate {subordinate_id}...")
         )
         asyncio.run_coroutine_threadsafe(
-            self._create_peer_connection(subordinate_id, warp_matrix, output_size),
+            self._create_peer_connection(subordinate_id, warp_matrix, output_size, screen_points, source_screen_size),
             self.loop,
         )
 
     async def _create_peer_connection(
-        self, subordinate_id, warp_matrix=None, output_size=None
+        self, subordinate_id, warp_matrix=None, output_size=None, screen_points=None, source_screen_size=None
     ):
         """Creates and sets up a new RTCPeerConnection."""
         if subordinate_id in self.connections:
@@ -194,12 +208,21 @@ class Coordinator:
         )
         pc.addTrack(video_track)
 
+        # Store screen_points as a list for serialization (convert numpy array to list if needed)
+        screen_points_list = None
+        if screen_points is not None:
+            if hasattr(screen_points, 'tolist'):
+                screen_points_list = screen_points.tolist()
+            else:
+                screen_points_list = screen_points
+
         self.connections[subordinate_id] = {
             "pc": pc,
             "video_track": video_track,
             "status": "connecting",
             "warp_matrix": warp_matrix,
             "output_size": output_size,
+            "screen_points": screen_points_list,  # Store for later recalculation
         }
 
         await self._setup_pc_handlers_and_offer(pc, subordinate_id)
@@ -250,14 +273,18 @@ class Coordinator:
             try:
                 msg_obj = json.loads(message)
                 if isinstance(msg_obj, dict) and msg_obj.get("type") == "subordinate-info":
+                    # This is a fallback - display size should already be received from server
+                    # during initial connection, but handle it here just in case
                     width = msg_obj.get("width")
                     height = msg_obj.get("height")
                     if width and height:
-                        logger.info(f"[Coordinator] Received subordinate-info from {subordinate_id}: width={width}, height={height}")
-                        self.subordinate_display_sizes[subordinate_id] = (width, height)
-                        self.status_queue.put(("subordinate-info", f"Received display size from {subordinate_id}: {width}x{height}"))
-                    else:
-                        logger.warning(f"subordinate-info missing width/height: {msg_obj}")
+                        logger.info(f"[Coordinator] Received subordinate-info via data channel from {subordinate_id}: width={width}, height={height}")
+                        # Only update if we don't already have this info
+                        if subordinate_id not in self.subordinate_display_sizes:
+                            self.subordinate_display_sizes[subordinate_id] = (width, height)
+                            # Update the connection with the actual display size if needed
+                            asyncio.ensure_future(self._update_connection_output_size(subordinate_id, (width, height)))
+                            self.status_queue.put(("subordinate-info", f"Received display size from {subordinate_id}: {width}x{height}"))
                 else:
                     self.status_queue.put(("message", f"Msg from {subordinate_id}: {message}"))
             except Exception as e:
@@ -336,6 +363,26 @@ class Coordinator:
             self._video_source_started = True
             logger.info(f"--- Shared {self._video_source_type} video source started ---")
 
+    async def _request_subordinate_info_and_connect(self, subordinate_id, warp_matrix, screen_points, source_screen_size):
+        """Request subordinate info from server and then connect."""
+        # Request subordinate info
+        request_message = {
+            "type": "get-subordinate-info",
+            "subordinateId": subordinate_id,
+        }
+        await self.websocket.send(json.dumps(request_message))
+        logger.info(f"Requested subordinate info for {subordinate_id}")
+        
+        # Wait for the response (it will be handled in _handle_signaling_message)
+        # Store pending connection info so we can use it when info arrives
+        if not hasattr(self, "_pending_connections"):
+            self._pending_connections = {}
+        self._pending_connections[subordinate_id] = {
+            "warp_matrix": warp_matrix,
+            "screen_points": screen_points,
+            "source_screen_size": source_screen_size,
+        }
+
     async def _handle_signaling_message(self, message):
         """Handles incoming messages from the signaling server."""
         data = json.loads(message)
@@ -351,6 +398,112 @@ class Coordinator:
             if "width" in data and "height" in data and "id" in data:
                 logger.info(f"[Coordinator] Subordinate {data['id']} reported display size: width={data['width']}, height={data['height']}")
                 self.subordinate_display_sizes[data["id"]] = (data["width"], data["height"])
+            return
+
+        if msg_type == "subordinate-info":
+            # Response to get-subordinate-info request
+            subordinate_id = data.get("subordinateId")
+            if "error" in data:
+                logger.warning(f"Failed to get subordinate info for {subordinate_id}: {data['error']}")
+                self.status_queue.put(
+                    ("error", f"Failed to get display size for {subordinate_id}: {data['error']}")
+                )
+                # Use default size if info not available
+                output_size = (640, 480)
+            else:
+                width = data.get("width")
+                height = data.get("height")
+                if width and height:
+                    output_size = (width, height)
+                    self.subordinate_display_sizes[subordinate_id] = output_size
+                    logger.info(f"[Coordinator] Received subordinate info for {subordinate_id}: {width}x{height}")
+                    self.status_queue.put(
+                        ("info", f"Received display size for {subordinate_id}: {width}x{height}")
+                    )
+                else:
+                    logger.warning(f"Invalid subordinate info response: {data}")
+                    output_size = (640, 480)
+            
+            # Check if there's a pending connection for this subordinate
+            if hasattr(self, "_pending_connections") and subordinate_id in self._pending_connections:
+                pending = self._pending_connections.pop(subordinate_id)
+                
+                # Recalculate warp matrix with the correct output size
+                warp_matrix = pending.get("warp_matrix")
+                screen_points = pending.get("screen_points")
+                source_screen_size = pending.get("source_screen_size")
+                
+                if screen_points is not None and source_screen_size is not None:
+                    # Convert screen_points back to numpy array if it's a list
+                    if isinstance(screen_points, list):
+                        screen_points_np = np.array(screen_points, dtype=np.float32)
+                    else:
+                        screen_points_np = screen_points
+                    
+                    # Ensure screen_points is in the right shape (4, 2)
+                    if len(screen_points_np.shape) == 3:
+                        screen_points_np = np.squeeze(screen_points_np, axis=1)
+                    
+                    if screen_points_np.shape[0] == 4:
+                        # Map the ENTIRE source screen to the subordinate display, maintaining aspect ratio
+                        src_width, src_height = source_screen_size
+                        src_aspect = src_width / src_height if src_height > 0 else 1.0
+                        
+                        dst_width, dst_height = output_size
+                        dst_aspect = dst_width / dst_height if dst_height > 0 else 1.0
+                        
+                        # Calculate how to fit the source screen within the destination while maintaining aspect ratio
+                        if src_aspect > dst_aspect:
+                            # Source is wider - fit to width, add letterboxing
+                            fit_width = dst_width
+                            fit_height = int(dst_width / src_aspect)
+                            offset_x = 0
+                            offset_y = (dst_height - fit_height) // 2
+                        else:
+                            # Source is taller - fit to height, add pillarboxing
+                            fit_width = int(dst_height * src_aspect)
+                            fit_height = dst_height
+                            offset_x = (dst_width - fit_width) // 2
+                            offset_y = 0
+                        
+                        # Create source rectangle (full screen corners)
+                        src_rect = np.float32([
+                            [0, 0],
+                            [src_width, 0],
+                            [src_width, src_height],
+                            [0, src_height]
+                        ])
+                        
+                        # Create destination rectangle that maintains aspect ratio
+                        dst_rect = np.float32([
+                            [offset_x, offset_y],
+                            [offset_x + fit_width, offset_y],
+                            [offset_x + fit_width, offset_y + fit_height],
+                            [offset_x, offset_y + fit_height]
+                        ])
+                        
+                        # Calculate homography from QR code corners to screen corners
+                        # First, find the transformation from QR code corners to screen corners
+                        qr_to_screen = cv2.getPerspectiveTransform(screen_points_np, src_rect)
+                        
+                        # Then, find transformation from screen corners to destination
+                        screen_to_dst = cv2.getPerspectiveTransform(src_rect, dst_rect)
+                        
+                        # Combine transformations: QR -> Screen -> Destination
+                        warp_matrix = screen_to_dst @ qr_to_screen
+                        
+                        logger.info(f"Recalculated warp matrix for {subordinate_id}: source screen {src_width}x{src_height} -> destination {fit_width}x{fit_height} (full display {dst_width}x{dst_height})")
+                
+                self.status_queue.put(
+                    ("connecting", f"Connecting to subordinate {subordinate_id}...")
+                )
+                await self._create_peer_connection(
+                    subordinate_id,
+                    warp_matrix,
+                    output_size,
+                    screen_points,
+                    source_screen_size
+                )
             return
 
         connection = self.connections.get(source_id)
@@ -382,6 +535,58 @@ class Coordinator:
                     logger.error(f"Error adding ICE candidate from {source_id}: {e}")
             else:
                 logger.warning(f"Received empty ICE candidate from {source_id}")
+
+    async def _update_connection_output_size(self, subordinate_id, new_output_size):
+        """Update the connection's output size and recalculate warp matrix if screen_points are available."""
+        connection = self.connections.get(subordinate_id)
+        if not connection:
+            logger.warning(f"Cannot update output size for unknown subordinate: {subordinate_id}")
+            return
+
+        screen_points = connection.get("screen_points")
+        if screen_points is None:
+            logger.info(f"No screen_points stored for {subordinate_id}, cannot recalculate warp matrix")
+            return
+
+        # Convert screen_points back to numpy array if it's a list
+        if isinstance(screen_points, list):
+            screen_points_np = np.array(screen_points, dtype=np.float32)
+        else:
+            screen_points_np = screen_points
+
+        # Ensure screen_points is in the right shape (4, 2)
+        if len(screen_points_np.shape) == 3:
+            screen_points_np = np.squeeze(screen_points_np, axis=1)
+
+        if screen_points_np.shape[0] != 4:
+            logger.warning(f"Invalid screen_points shape for {subordinate_id}: {screen_points_np.shape}")
+            return
+
+        # Create new destination rectangle with the actual display size
+        width, height = new_output_size
+        dst_rect = np.float32([
+            [0, 0],
+            [width, 0],
+            [width, height],
+            [0, height]
+        ])
+
+        # Recalculate the perspective transform matrix
+        new_warp_matrix = cv2.getPerspectiveTransform(screen_points_np, dst_rect)
+
+        # Update the connection dictionary
+        connection["warp_matrix"] = new_warp_matrix
+        connection["output_size"] = new_output_size
+
+        # Update the video track
+        video_track = connection.get("video_track")
+        if video_track:
+            video_track.warp_matrix = new_warp_matrix
+            video_track.output_size = new_output_size
+            logger.info(f"Updated connection for {subordinate_id} with output_size={new_output_size}")
+            self.status_queue.put(("warp_updated", f"Updated warp matrix for {subordinate_id} with display size {width}x{height}"))
+        else:
+            logger.warning(f"No video track found for {subordinate_id}")
 
     async def cleanup_connection(self, subordinate_id):
         """Cleans up a connection for a given subordinate."""
