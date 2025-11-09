@@ -7,7 +7,7 @@ in the QR Code Scanner application.
 import json
 
 import cv2
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from .screen_capture_thread import ScreenCaptureThread
 from .video_file_thread import VideoFileThread
@@ -184,3 +184,23 @@ class VideoFileManager(QObject):
             and self.video_file_thread.frame_height > 0):
             return (self.video_file_thread.frame_width, self.video_file_thread.frame_height)
         return None
+
+
+class ConnectionManager(QObject):
+    """Manages connection status updates from the coordinator."""
+
+    status_update = pyqtSignal(str)
+
+    def __init__(self, coordinator, parent=None):
+        super().__init__(parent)
+        self.coordinator = coordinator
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.check_status)
+        self.timer.start(100)  # Check every 100ms
+
+    def check_status(self):
+        """Check for status updates from the coordinator and emit signals."""
+        status = self.coordinator.get_status()
+        if status:
+            status_type, message = status
+            self.status_update.emit(f"[{status_type.upper()}] {message}")

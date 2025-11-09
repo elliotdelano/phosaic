@@ -8,7 +8,6 @@ import json
 import sys
 import cv2
 import numpy as np
-from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -59,11 +58,6 @@ class MainWindow(QMainWindow):
         # Initial setup
         self.coordinator.start()
         self.camera_manager.enumerate_cameras()
-
-        # Set up timer for coordinator status updates
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_coordinator_status)
-        self.timer.start(100)
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -430,13 +424,6 @@ class MainWindow(QMainWindow):
             and self.video_file_manager.video_file_thread.isRunning()
         ):
             self.toggle_screen_capture()
-
-    def update_coordinator_status(self):
-        """Update UI with status from coordinator."""
-        status = self.coordinator.get_status()
-        if status:
-            status_type, message = status
-            self.append_status_message(f"[{status_type.upper()}] {message}")
 
     def append_status_message(self, message):
         """Append a message to the status text box."""
