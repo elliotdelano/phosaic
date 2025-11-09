@@ -1,21 +1,38 @@
-const ws = new WebSocket(`ws://${window.location.host}`);
+let ws = null; // WebSocket will be created after fullscreen
 let peerConnection;
 let myId;
 let coordinatorId; // ID of the coordinator we are talking to
+let qrCodeDisplayed = false; // Track if QR code is currently displayed
+let refreshHandler = null; // Store the refresh handler function
+let displaySize = null; // Store display size captured after fullscreen
 
 const configuration = {
 	iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
+function connectWebSocket() {
+	if (ws) {
+		return; // Already connected or connecting
+	}
+	
+	if (!displaySize) {
+		console.error("Display size not captured before connection");
+		return;
+	}
+	
+	ws = new WebSocket(`ws://${window.location.host}`);
+
 ws.onopen = () => {
 	console.log("Connected to signaling server");
-	// Get true device pixel size
-	const width = window.innerWidth;
-	const height = window.innerHeight;
+		// Use display size captured right after fullscreen
 	console.log(
-		`[Subordinate] Reporting display size: width=${width}, height=${height}`
+			`[Subordinate] Reporting display size: width=${displaySize.width}, height=${displaySize.height}`
 	);
-	ws.send(JSON.stringify({ type: "register-subordinate", width, height }));
+		ws.send(JSON.stringify({ 
+			type: "register-subordinate", 
+			width: displaySize.width, 
+			height: displaySize.height 
+		}));
 };
 
 ws.onmessage = async (message) => {
@@ -25,7 +42,7 @@ ws.onmessage = async (message) => {
 	switch (data.type) {
 		case "registered":
 			myId = data.id;
-			generateQRCode(myId);
+				generateQRCode(data.id);
 			break;
 		case "offer":
 			// When we get an offer, store the sender's ID (the coordinator's ID)
@@ -48,6 +65,175 @@ ws.onmessage = async (message) => {
 	}
 };
 
+	ws.onclose = () => {
+		console.log("Disconnected from signaling server");
+	};
+
+	ws.onerror = (error) => {
+		console.error("WebSocket error:", error);
+	};
+}
+
+function isFullscreen() {
+	return !!(
+		document.fullscreenElement ||
+		document.webkitFullscreenElement ||
+		document.mozFullScreenElement ||
+		document.msFullscreenElement
+	);
+}
+
+function attemptFullscreen() {
+	const element = document.documentElement;
+	if (element.requestFullscreen) {
+		return element.requestFullscreen().catch((err) => {
+			console.log("Fullscreen request failed:", err);
+			throw err;
+		});
+	} else if (element.webkitRequestFullscreen) {
+		// Safari
+		element.webkitRequestFullscreen();
+		return Promise.resolve();
+	} else if (element.msRequestFullscreen) {
+		// IE/Edge
+		element.msRequestFullscreen();
+		return Promise.resolve();
+	} else if (element.mozRequestFullScreen) {
+		// Firefox
+		element.mozRequestFullScreen();
+		return Promise.resolve();
+	}
+	return Promise.reject(new Error("Fullscreen not supported"));
+}
+
+function exitFullscreen() {
+	if (document.exitFullscreen) {
+		return document.exitFullscreen().catch((err) => {
+			console.log("Exit fullscreen failed:", err);
+			throw err;
+		});
+	} else if (document.webkitExitFullscreen) {
+		// Safari
+		document.webkitExitFullscreen();
+		return Promise.resolve();
+	} else if (document.msExitFullscreen) {
+		// IE/Edge
+		document.msExitFullscreen();
+		return Promise.resolve();
+	} else if (document.mozCancelFullScreen) {
+		// Firefox
+		document.mozCancelFullScreen();
+		return Promise.resolve();
+	}
+	return Promise.resolve(); // If not in fullscreen, resolve immediately
+}
+
+async function checkFullscreenAndConnect() {
+	if (isFullscreen()) {
+		// Already in fullscreen, wait for it to complete sizing
+		hideFullscreenPrompt();
+		await waitForFullscreenComplete();
+		await handleFullscreenComplete();
+	} else {
+		// Not in fullscreen, show prompt and wait for user interaction
+		showFullscreenPrompt();
+	}
+}
+
+function waitForFullscreenComplete() {
+	return new Promise((resolve) => {
+		// Wait for fullscreen change event
+		const checkFullscreen = () => {
+			if (isFullscreen()) {
+				// Wait for browser to finish resizing - use requestAnimationFrame to ensure layout is complete
+				requestAnimationFrame(() => {
+					requestAnimationFrame(() => {
+						// Double RAF ensures layout is complete
+						resolve();
+					});
+				});
+			}
+		};
+		
+		// Check immediately in case we're already in fullscreen
+		if (isFullscreen()) {
+			checkFullscreen();
+		} else {
+			// Listen for fullscreen change
+			const handler = () => {
+				checkFullscreen();
+				// Remove listeners after resolving
+				document.removeEventListener("fullscreenchange", handler);
+				document.removeEventListener("webkitfullscreenchange", handler);
+				document.removeEventListener("mozfullscreenchange", handler);
+				document.removeEventListener("MSFullscreenChange", handler);
+			};
+			
+			document.addEventListener("fullscreenchange", handler);
+			document.addEventListener("webkitfullscreenchange", handler);
+			document.addEventListener("mozfullscreenchange", handler);
+			document.addEventListener("MSFullscreenChange", handler);
+		}
+	});
+}
+
+function showFullscreenPrompt() {
+	const prompt = document.getElementById("fullscreen-prompt");
+	prompt.classList.remove("hidden");
+	
+	// Add click/touch handler to enter fullscreen
+	const handleInteraction = async () => {
+		try {
+			await attemptFullscreen();
+			// Wait for fullscreen to complete and browser to finish resizing
+			await waitForFullscreenComplete();
+			// Now capture display size and connect
+			await handleFullscreenComplete();
+		} catch (err) {
+			console.error("Failed to enter fullscreen:", err);
+		}
+	};
+	
+	prompt.onclick = handleInteraction;
+	prompt.ontouchstart = handleInteraction;
+}
+
+function hideFullscreenPrompt() {
+	const prompt = document.getElementById("fullscreen-prompt");
+	prompt.classList.add("hidden");
+	prompt.onclick = null;
+	prompt.ontouchstart = null;
+}
+
+async function handleFullscreenComplete() {
+	hideFullscreenPrompt();
+
+  //wait for system animations outside the browser to complete
+  await new Promise(resolve => setTimeout(resolve, 200)); 
+	
+  // Capture display size after fullscreen has finished resizing
+	displaySize = {
+		width: window.innerWidth,
+		height: window.innerHeight
+	};
+	console.log(
+		`[Subordinate] Captured display size after fullscreen: width=${displaySize.width}, height=${displaySize.height}`
+	);
+	// Connect WebSocket after capturing display size
+	connectWebSocket();
+}
+
+function handleFullscreenChange() {
+	if (isFullscreen()) {
+		// Only handle if not already processing (to avoid duplicate calls)
+		if (!displaySize) {
+			waitForFullscreenComplete().then(() => {
+				handleFullscreenComplete();
+			});
+		}
+	}
+}
+
 function setQRCodeSize() {
 	const qrCodeElement = document.getElementById("qrcode");
 	const size = Math.min(window.innerWidth, window.innerHeight) * 0.9;
@@ -63,6 +249,51 @@ function generateQRCode(id) {
 	const qrCodeElement = document.getElementById("qrcode");
 	qrCodeElement.innerHTML = qr.createImgTag(10, 0);
 	setQRCodeSize();
+	qrCodeDisplayed = true;
+	enableRefreshOnTap();
+}
+
+function enableRefreshOnTap() {
+	// Remove any existing handler
+	disableRefreshOnTap();
+	
+	// Create handler that exits fullscreen then refreshes the page
+	refreshHandler = async () => {
+		if (qrCodeDisplayed) {
+			// Disable the handler immediately to prevent multiple taps
+			disableRefreshOnTap();
+			
+			// Exit fullscreen if we're in it
+			if (isFullscreen()) {
+				try {
+					await exitFullscreen();
+					// Wait a brief moment for fullscreen to fully exit
+					setTimeout(() => {
+						window.location.reload();
+					}, 100);
+				} catch (err) {
+					console.error("Failed to exit fullscreen:", err);
+					// Refresh anyway even if exit failed
+					window.location.reload();
+				}
+			} else {
+				// Not in fullscreen, refresh immediately
+				window.location.reload();
+			}
+		}
+	};
+	
+	// Add event listeners for both click and touch
+	document.addEventListener("click", refreshHandler);
+	document.addEventListener("touchend", refreshHandler);
+}
+
+function disableRefreshOnTap() {
+	if (refreshHandler) {
+		document.removeEventListener("click", refreshHandler);
+		document.removeEventListener("touchend", refreshHandler);
+		refreshHandler = null;
+	}
 }
 
 async function handleOffer(offer) {
@@ -80,6 +311,8 @@ async function handleOffer(offer) {
 
 			qrCodeElement.style.display = "none";
 			videoElement.style.display = "block";
+			qrCodeDisplayed = false;
+			disableRefreshOnTap();
 			console.log(
 				"Video element srcObject set with new MediaStream. Attempting to play..."
 			);
@@ -111,7 +344,7 @@ async function handleOffer(offer) {
 	};
 
 	peerConnection.onicecandidate = (event) => {
-		if (event.candidate) {
+		if (event.candidate && ws) {
 			// Send candidate to the coordinator that sent the offer
 			ws.send(
 				JSON.stringify({
@@ -147,6 +380,7 @@ async function handleOffer(offer) {
 		await peerConnection.setLocalDescription(answer);
 
 		// Send the answer back to the specific coordinator
+		if (ws) {
 		ws.send(
 			JSON.stringify({
 				type: "answer",
@@ -155,19 +389,22 @@ async function handleOffer(offer) {
 				sourceId: myId,
 			})
 		);
+		}
 	} catch (error) {
 		console.error("Error handling offer:", error);
 	}
 }
 
-ws.onclose = () => {
-	console.log("Disconnected from signaling server");
-};
+// Listen for fullscreen changes
+document.addEventListener("fullscreenchange", handleFullscreenChange);
+document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+document.addEventListener("MSFullscreenChange", handleFullscreenChange);
 
-ws.onerror = (error) => {
-	console.error("WebSocket error:", error);
-};
+// Check fullscreen status on load and show prompt if needed
+window.addEventListener("load", () => {
+	setQRCodeSize();
+	checkFullscreenAndConnect();
+});
 
-// Set initial QR code size and update on resize
-window.addEventListener("load", setQRCodeSize);
 window.addEventListener("resize", setQRCodeSize);
