@@ -8,7 +8,7 @@ import json
 import sys
 import cv2
 import numpy as np
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
@@ -21,6 +21,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PyQt6.QtCore import Qt, QTimer
+from qt_material import apply_stylesheet
 
 # Add project root to path to allow sibling imports
 sys.path.append(sys.path[0] + "/..")
@@ -113,6 +115,12 @@ class MainWindow(QMainWindow):
     def create_screen_capture_group(self):
         """Create the screen capture group widget."""
         group = QGroupBox("Video Source")
+        group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                padding-top: 20px;
+            }
+        """)
         layout = QVBoxLayout(group)
         
         # Source type selection
@@ -121,6 +129,8 @@ class MainWindow(QMainWindow):
         self.source_type_combo = QComboBox()
         self.source_type_combo.addItems(["Screen Capture", "Video File"])
         self.source_type_combo.currentIndexChanged.connect(self.on_source_type_changed)
+        self.source_type_combo.setMinimumWidth(150)  # Set minimum width to prevent text cutoff
+        self.source_type_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         source_type_layout.addWidget(self.source_type_combo)
         source_type_layout.addStretch()
         layout.addLayout(source_type_layout)
@@ -425,6 +435,7 @@ class MainWindow(QMainWindow):
         """Append a message to the status text box."""
         self.status_text.append(str(message))
         scrollbar = self.status_text.verticalScrollBar()
+        # PyQt6: Use .setValue and .maximum() as before
         scrollbar.setValue(scrollbar.maximum())
 
     def closeEvent(self, event):
@@ -448,12 +459,31 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+
 def main():
     """Main entry point."""
+    # Create application instance first
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec_())
+    # Apply material theme
+    apply_stylesheet(app, theme='dark_teal.xml')
+    
+    # Create window after app is initialized
+    window = None
+    def create_window():
+        nonlocal window
+        window = MainWindow()
+        # Additional styling for specific widgets
+        window.status_text.setStyleSheet("""
+            QTextEdit {
+                background-color: rgba(0, 0, 0, 40);
+                border-radius: 4px;
+                padding: 4px;
+            }
+        """)
+        window.show()
+    # Use QTimer to create and show window after event loop starts
+    QTimer.singleShot(0, create_window)
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ in the QR Code Scanner application.
 import json
 
 import cv2
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .screen_capture_thread import ScreenCaptureThread
 from .video_file_thread import VideoFileThread

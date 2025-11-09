@@ -5,9 +5,9 @@ ScreenCaptureWidget component for displaying screen capture feed.
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage, QPainter, QPixmap
-from PyQt5.QtWidgets import QSizePolicy, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QImage, QPainter, QPixmap
+from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 
 class ScreenCaptureWidget(QWidget):
@@ -16,7 +16,7 @@ class ScreenCaptureWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(320, 240)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.current_frame = None
         self.pixmap = None
 
@@ -48,7 +48,7 @@ class ScreenCaptureWidget(QWidget):
             # Create a copy of the data to ensure QImage has its own copy
             rgb_data = rgb_frame.copy()
             q_image = QImage(
-                rgb_data.data, width, height, bytes_per_line, QImage.Format_RGB888
+                rgb_data.data, width, height, bytes_per_line, QImage.Format.Format_RGB888
             )
 
             # Ensure the image is valid
@@ -71,14 +71,14 @@ class ScreenCaptureWidget(QWidget):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Get widget dimensions
         widget_rect = self.rect()
 
         # Scale pixmap to fit widget while maintaining aspect ratio
         scaled_pixmap = self.pixmap.scaled(
-            widget_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            widget_rect.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
 
         # Calculate position to center the image

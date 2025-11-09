@@ -5,7 +5,7 @@ ScreenCaptureThread for consuming screen frames from the centralized service.
 
 import time
 
-from PyQt5.QtCore import QThread, pyqtSignal, QWaitCondition, QMutex
+from PyQt6.QtCore import QThread, pyqtSignal, QWaitCondition, QMutex
 
 from .screen_capture_service import ScreenCaptureService
 

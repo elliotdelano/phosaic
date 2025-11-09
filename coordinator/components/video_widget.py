@@ -7,9 +7,9 @@ import json
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PyQt5.QtWidgets import QSizePolicy, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 
 class VideoWidget(QWidget):
@@ -18,7 +18,7 @@ class VideoWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(320, 240)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.current_frame = None
         self.pixmap = None
         self.qr_codes = []
@@ -35,7 +35,7 @@ class VideoWidget(QWidget):
         height, width, channel = rgb_frame.shape
         bytes_per_line = 3 * width
         q_image = QImage(
-            rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888
+            rgb_frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888
         )
 
         # Create pixmap and scale it to fit widget while maintaining aspect ratio
@@ -48,14 +48,14 @@ class VideoWidget(QWidget):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Get widget dimensions
         widget_rect = self.rect()
 
         # Scale pixmap to fit widget while maintaining aspect ratio
         scaled_pixmap = self.pixmap.scaled(
-            widget_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            widget_rect.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
 
         # Calculate position to center the image

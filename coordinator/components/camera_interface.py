@@ -3,8 +3,8 @@
 CameraInterface widget component for the QR Code Scanner application.
 """
 
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -44,7 +44,9 @@ class CameraInterface(QGroupBox):
         controls_layout.addWidget(QLabel("Camera:"))
 
         self.camera_combo = QComboBox()
-
+        self.camera_combo.setMinimumWidth(120)  # Set minimum width to prevent text cutoff
+        self.camera_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        
         self.camera_combo.currentIndexChanged.connect(
             self.camera_selection_changed.emit
         )
