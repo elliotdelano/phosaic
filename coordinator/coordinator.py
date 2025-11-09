@@ -90,6 +90,7 @@ class Coordinator:
         self.coordinator_id = None
         self.websocket = None
         self._video_source_started = False
+        self.subordinate_display_sizes = {}  # subordinate_id -> (width, height)
         self._video_source_type = "screen"  # "screen" or "file"
         self._video_file_path = None
 
@@ -185,6 +186,7 @@ class Coordinator:
         # Set default output size if not provided
         if output_size is None:
             output_size = (640, 480)
+        logger.info(f"[Coordinator] Creating peer connection for {subordinate_id} with output_size={output_size}")
 
         pc = RTCPeerConnection()
         video_track = RTCVideoStreamTrack(
@@ -245,7 +247,22 @@ class Coordinator:
         @channel.on("message")
         def on_message(message):
             logger.info(f"Received message from {subordinate_id}: {message}")
-            self.status_queue.put(("message", f"Msg from {subordinate_id}: {message}"))
+            try:
+                msg_obj = json.loads(message)
+                if isinstance(msg_obj, dict) and msg_obj.get("type") == "subordinate-info":
+                    width = msg_obj.get("width")
+                    height = msg_obj.get("height")
+                    if width and height:
+                        logger.info(f"[Coordinator] Received subordinate-info from {subordinate_id}: width={width}, height={height}")
+                        self.subordinate_display_sizes[subordinate_id] = (width, height)
+                        self.status_queue.put(("subordinate-info", f"Received display size from {subordinate_id}: {width}x{height}"))
+                    else:
+                        logger.warning(f"subordinate-info missing width/height: {msg_obj}")
+                else:
+                    self.status_queue.put(("message", f"Msg from {subordinate_id}: {message}"))
+            except Exception as e:
+                logger.warning(f"Failed to parse data channel message from {subordinate_id}: {e}")
+                self.status_queue.put(("message", f"Msg from {subordinate_id}: {message}"))
 
         # Create and send offer
         offer = await pc.createOffer()
@@ -257,7 +274,7 @@ class Coordinator:
             "targetId": subordinate_id,
             "offer": {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type},
         }
-        logger.info(f"Sending offer to {subordinate_id}...")
+        logger.info(f"[Coordinator] Sending offer to {subordinate_id} with output_size={self.connections[subordinate_id]['output_size']}")
         await self.websocket.send(json.dumps(message))
         self.status_queue.put(("offer_sent", f"WebRTC offer sent to {subordinate_id}"))
 
@@ -329,7 +346,11 @@ class Coordinator:
             f"Received signaling message of type '{msg_type}' from '{source_id}'"
         )
 
-        if msg_type == "registered":  # Ignore our own registration confirmation
+        if msg_type == "registered":
+            # If subordinate registration, store display size if present
+            if "width" in data and "height" in data and "id" in data:
+                logger.info(f"[Coordinator] Subordinate {data['id']} reported display size: width={data['width']}, height={data['height']}")
+                self.subordinate_display_sizes[data["id"]] = (data["width"], data["height"])
             return
 
         connection = self.connections.get(source_id)

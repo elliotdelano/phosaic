@@ -230,14 +230,24 @@ class MainWindow(QMainWindow):
                 mapper = ProjectionMapper(screen_size, camera_size)
                 screen_points = mapper.map_points(points)
 
-                # Define the destination rectangle (default 640x480, configurable)
-                output_size = (640, 480)  # (width, height)
+                # Try to get the subordinate's display size from the coordinator
+                output_size = (640, 480)  # default
                 dst_rect = np.float32([
                     [0, 0],
                     [output_size[0], 0],
                     [output_size[0], output_size[1]],
                     [0, output_size[1]]
                 ])
+                if hasattr(self.coordinator, "subordinate_display_sizes"):
+                    display_size = self.coordinator.subordinate_display_sizes.get(subordinate_id)
+                    if display_size and isinstance(display_size, (tuple, list)) and len(display_size) == 2:
+                        output_size = (int(display_size[0]), int(display_size[1]))
+                        dst_rect = np.float32([
+                            [0, 0],
+                            [output_size[0], 0],
+                            [output_size[0], output_size[1]],
+                            [0, output_size[1]]
+                        ])
 
                 # Ensure screen_points is in the right shape (4, 2)
                 if screen_points is None or screen_points.shape[0] != 4:
