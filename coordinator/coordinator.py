@@ -10,7 +10,7 @@ from concurrent.futures import TimeoutError
 import av
 from aiortc import RTCIceCandidate, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import VideoStreamTrack
-from video_source import ScreenCaptureSource
+from video_source import ScreenCaptureSource, VideoFileSource
 from websockets.client import connect
 
 logging.basicConfig(level=logging.INFO)
@@ -107,6 +107,8 @@ class Coordinator:
         self.coordinator_id = None
         self.websocket = None
         self._video_source_started = False
+        self._video_source_type = "screen"  # "screen" or "file"
+        self._video_file_path = None
 
     def start(self):
         """Start the coordinator's main event loop and websocket connection."""
@@ -261,14 +263,63 @@ class Coordinator:
         await self.websocket.send(json.dumps(message))
         self.status_queue.put(("offer_sent", f"WebRTC offer sent to {subordinate_id}"))
 
+    def set_video_source_type(self, source_type, video_file_path=None):
+        """
+        Set the video source type.
+        
+        Args:
+            source_type: "screen" or "file"
+            video_file_path: Path to video file (required if source_type is "file")
+        """
+        if source_type not in ["screen", "file"]:
+            logger.error(f"Invalid video source type: {source_type}")
+            return False
+        
+        # If switching source type, stop current source
+        if self._video_source_started and self.video_source:
+            logger.info(f"Stopping current video source to switch to {source_type}")
+            self.video_source.stop()
+            self.video_source = None
+            self._video_source_started = False
+        
+        self._video_source_type = source_type
+        if source_type == "file":
+            if not video_file_path:
+                logger.error("Video file path required for file source type")
+                return False
+            self._video_file_path = video_file_path
+        else:
+            self._video_file_path = None
+        
+        # If there are active connections, start the new source
+        if self.connections:
+            self._start_video_source_if_needed()
+            # Re-add all tracks to the new source
+            for connection in self.connections.values():
+                if self.video_source and connection.get("video_track"):
+                    self.video_source.add_track(connection["video_track"])
+        
+        return True
+
     def _start_video_source_if_needed(self):
         """Starts the shared video source if it's not already running."""
         if not self._video_source_started:
-            logger.info("--- Starting shared ScreenCaptureSource ---")
-            self.video_source = ScreenCaptureSource(self.loop)
+            if self._video_source_type == "screen":
+                logger.info("--- Starting shared ScreenCaptureSource ---")
+                self.video_source = ScreenCaptureSource(self.loop)
+            elif self._video_source_type == "file":
+                if not self._video_file_path:
+                    logger.error("Video file path not set for file source")
+                    return
+                logger.info(f"--- Starting shared VideoFileSource for {self._video_file_path} ---")
+                self.video_source = VideoFileSource(self._video_file_path, self.loop)
+            else:
+                logger.error(f"Unknown video source type: {self._video_source_type}")
+                return
+            
             self.video_source.start()
             self._video_source_started = True
-            logger.info("--- Shared ScreenCaptureSource started ---")
+            logger.info(f"--- Shared {self._video_source_type} video source started ---")
 
     async def _handle_signaling_message(self, message):
         """Handles incoming messages from the signaling server."""

@@ -10,6 +10,7 @@ import cv2
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from .screen_capture_thread import ScreenCaptureThread
+from .video_file_thread import VideoFileThread
 from .video_thread import VideoThread
 
 
@@ -126,6 +127,46 @@ class ScreenCaptureManager(QObject):
         if self.screen_capture_thread:
             self.screen_capture_thread.stop()
             self.screen_capture_thread = None
+
+
+class VideoFileManager(QObject):
+    """Manages video file operations for UI preview."""
+
+    frame_ready = pyqtSignal(object)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.video_file_thread = None
+        self.video_file_path = None
+
+    def set_video_file(self, video_file_path):
+        """Set the video file path."""
+        self.video_file_path = video_file_path
+
+    def toggle_video_file(self):
+        """Toggle video file playback start/stop."""
+        if self.video_file_thread and self.video_file_thread.isRunning():
+            self.stop_video_file()
+        else:
+            self.start_video_file()
+
+    def start_video_file(self):
+        """Start the video file playback and processing."""
+        if not self.video_file_path:
+            return False
+
+        self.video_file_thread = VideoFileThread(self.video_file_path)
+        self.video_file_thread.frame_ready.connect(self.frame_ready.emit)
+        self.video_file_thread.error_occurred.connect(self.error_occurred.emit)
+        self.video_file_thread.start()
+        return True
+
+    def stop_video_file(self):
+        """Stop the video file playback and processing."""
+        if self.video_file_thread:
+            self.video_file_thread.stop()
+            self.video_file_thread = None
 
 
 class ConnectionManager(QObject):

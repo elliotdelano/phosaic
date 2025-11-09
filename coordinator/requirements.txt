@@ -2,5 +2,6 @@ websockets
 aiortc
 numpy
 av
+opencv-python
 mss
 pyscreenshot  # For Wayland screen capture support (optional but recommended for Fedora/GNOME Wayland)
