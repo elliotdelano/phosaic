@@ -325,6 +325,66 @@ async function handleOffer(offer) {
 			// Mute the video element to allow autoplay in most browsers
 			videoElement.muted = true;
 
+			// Add stream status monitoring
+			videoElement.addEventListener("ended", () => {
+				console.log("[Subordinate] Video stream ended");
+				qrCodeElement.style.display = "block";
+				videoElement.style.display = "none";
+				qrCodeDisplayed = true;
+			});
+
+			videoElement.addEventListener("stalled", () => {
+				console.log("[Subordinate] Video stream stalled");
+			});
+
+			videoElement.addEventListener("waiting", () => {
+				console.log("[Subordinate] Video stream buffering/waiting");
+			});
+
+			videoElement.addEventListener("error", (e) => {
+				console.error(
+					"[Subordinate] Video stream error:",
+					e.target.error
+				);
+				qrCodeElement.style.display = "block";
+				videoElement.style.display = "none";
+				qrCodeDisplayed = true;
+			});
+
+			// Track if we haven't received frames for a while
+			let lastTimeUpdate = Date.now();
+			videoElement.addEventListener("timeupdate", () => {
+				lastTimeUpdate = Date.now();
+			});
+
+			// Check for stream health periodically
+			const healthCheck = setInterval(() => {
+				if (!videoElement.srcObject) {
+					console.log("[Subordinate] Video stream disconnected");
+					clearInterval(healthCheck);
+					qrCodeElement.style.display = "block";
+					videoElement.style.display = "none";
+					qrCodeDisplayed = true;
+					return;
+				}
+
+				const now = Date.now();
+				if (now - lastTimeUpdate > 5000) {
+					// No updates for 5 seconds
+					console.log("[Subordinate] Video stream appears frozen");
+					if (videoElement.readyState < 3) {
+						// HAVE_FUTURE_DATA = 3
+						console.log(
+							"[Subordinate] Insufficient data available"
+						);
+					}
+					clearInterval(healthCheck);
+					qrCodeElement.style.display = "block";
+					videoElement.style.display = "none";
+					qrCodeDisplayed = true;
+				}
+			}, 5000);
+
 			videoElement
 				.play()
 				.then(() => {
